@@ -51,6 +51,9 @@ let CURRENT_USER = null;
 let USER_ROLE    = null;
 let unsubTournament = null;
 let unsubResults    = null;
+let unsubLiveWatch  = null;
+let liveWatchIv     = null; // polling de secours (mobile en veille)
+let pendingSpecTarget = null;
 
 const ST = {
   page:1, prevPage:1, rulesOpen:false,
@@ -141,6 +144,8 @@ onAuthStateChanged(auth, async (user)=>{
 function unsubAll(){
   if(unsubTournament){ unsubTournament(); unsubTournament=null; }
   if(unsubResults)   { unsubResults();    unsubResults=null;    }
+  stopLiveWatch();
+  startLiveWatch();
 }
 
 // ── Auth actions ─────────────────────────────────────────
@@ -163,8 +168,13 @@ window.logout = async function(){
 };
 
 // ── Mode Live spectateur ─────────────────────────────────
-window.enterLiveModeAndGo = function(target){
+window.enterLiveModeAndGo = async function(target){
+  try {
+    const snap = await getDoc(doc(db,'interclub','status'));
+    if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
+  } catch(e){ console.warn('enterLiveModeAndGo: relecture liveOpen échouée', e); }
   if(target !== 'R' && target !== 'T' && !ST.liveOpen){
+    pendingSpecTarget = target;
     const overlay = document.getElementById('liveClosedOverlay');
     if(overlay) overlay.style.display='flex';
     return;
@@ -182,7 +192,70 @@ window.enterLiveModeAndGo = function(target){
   else { goTo(target); }
 };
 
+// ── Gestion centralisée de liveOpen ─────────────────────────────────────
+function handleLiveOpenChange(nowOpen){
+  const wasOpen = ST.liveOpen;
+  ST.liveOpen = nowOpen;
+  updateLiveToggleBtn();
+  // Fermeture : expulser les spectateurs sur l'overlay
+  if(wasOpen && !ST.liveOpen){
+    const appScreen = document.getElementById('appScreen');
+    const isInApp = appScreen && appScreen.style.display !== 'none';
+    if(isInApp && (USER_ROLE === 'spectator' || USER_ROLE === null)){
+      const overlay = document.getElementById('liveClosedOverlay');
+      if(overlay) overlay.style.display = 'flex';
+      pendingSpecTarget = typeof ST.page === 'number' ? ST.page : 4;
+    }
+    return;
+  }
+  // Ouverture : débloquer le spectateur en attente
+  if(!wasOpen && ST.liveOpen && pendingSpecTarget !== null){
+    const overlay = document.getElementById('liveClosedOverlay');
+    if(overlay) overlay.style.display = 'none';
+    const target = pendingSpecTarget;
+    pendingSpecTarget = null;
+    if(USER_ROLE === 'spectator'){
+      if(target === 'R') toggleRules();
+      else if(target === 'T') goTo('T');
+      else goTo(target);
+    } else {
+      enterLiveModeAndGo(target);
+    }
+  }
+}
+
+// ── startLiveWatch : listener + polling sur interclub/status ─────────────
+function startLiveWatch(){
+  if(unsubLiveWatch) return;
+  unsubLiveWatch = onSnapshot(doc(db,'interclub','status'), (snap)=>{
+    if(!snap.exists()) return;
+    handleLiveOpenChange(snap.data().liveOpen === true);
+  }, (e)=>{ console.warn('startLiveWatch', e); });
+  if(!liveWatchIv){
+    liveWatchIv = setInterval(async ()=>{
+      try {
+        const snap = await getDoc(doc(db,'interclub','status'));
+        if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
+      } catch(e){}
+    }, 4000);
+  }
+}
+function stopLiveWatch(){
+  if(unsubLiveWatch){ unsubLiveWatch(); unsubLiveWatch=null; }
+  if(liveWatchIv){ clearInterval(liveWatchIv); liveWatchIv=null; }
+}
+startLiveWatch();
+
+document.addEventListener('visibilitychange', async ()=>{
+  if(document.visibilityState !== 'visible') return;
+  try {
+    const snap = await getDoc(doc(db,'interclub','status'));
+    if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
+  } catch(e){ console.warn('resync visibilitychange', e); }
+});
+
 function subscribeToTournamentPublic(){
+  if(!unsubLiveWatch || !liveWatchIv) startLiveWatch();
   unsubTournament = onSnapshot(doc(db,'interclub','current'), (snap)=>{
     if(!snap.exists()) return;
     const data=snap.data();
@@ -190,11 +263,11 @@ function subscribeToTournamentPublic(){
     if(data.teams)    ST.teams    = data.teams;
     if(data.schedule) ST.schedule = data.schedule;
     if(data.activeRound!=null) ST.activeRound = data.activeRound;
-    ST.liveOpen = data.liveOpen === true;
+    handleLiveOpenChange(data.liveOpen === true);
     if(ST.page===4) renderTournament();
     if(ST.page===5) renderFinal();
     if(ST.schedule.length>0 && ST.page<4) goTo(4);
-  });
+  }, (e)=>{ console.warn('subscribeToTournamentPublic', e); });
 }
 function normalizeResult(data){
   return { ga: data.ga==null?'':data.ga, gb: data.gb==null?'':data.gb };
@@ -212,6 +285,7 @@ function subscribeToResultsPublic(){
 
 // ── Subscriptions authentifiées ──────────────────────────
 function subscribeToTournament(){
+  if(!unsubLiveWatch || !liveWatchIv) startLiveWatch();
   unsubTournament = onSnapshot(doc(db,'interclub','current'), (snap)=>{
     if(!snap.exists()) return;
     const data=snap.data();
@@ -219,8 +293,7 @@ function subscribeToTournament(){
     if(data.teams)    ST.teams    = data.teams;
     if(data.schedule) ST.schedule = data.schedule;
     if(data.activeRound!=null) ST.activeRound = data.activeRound;
-    ST.liveOpen = data.liveOpen === true;
-    updateLiveToggleBtn();
+    handleLiveOpenChange(data.liveOpen === true);
     if(ST.page===2) renderTeams();
     if(ST.page===3) renderGen();
     if(ST.page===4) renderTournament();
@@ -242,7 +315,12 @@ function subscribeToResults(){
 // FIREBASE SAVE
 // ══════════════════════════════════════════════════════════
 async function saveTournament(patch){
-  try { await setDoc(doc(db,'interclub','current'), patch, {merge:true}); }
+  try {
+    await setDoc(doc(db,'interclub','current'), patch, {merge:true});
+    if('liveOpen' in patch){
+      await setDoc(doc(db,'interclub','status'), { liveOpen: patch.liveOpen }, {merge:true});
+    }
+  }
   catch(e){ console.error('Save error:',e); }
 }
 async function saveResult(key, ga, gb){
@@ -389,9 +467,18 @@ function updateSteps(n){
     if(el) el.classList.toggle('done',i<n);
   }
 }
-window.spectatorGoLive = function(n){
-  if(n==='T') goTo('T');
-  else goTo(n);
+window.spectatorGoLive = async function(n){
+  try {
+    const snap = await getDoc(doc(db,'interclub','status'));
+    if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
+  } catch(e){ console.warn('spectatorGoLive: relecture liveOpen échouée', e); }
+  if(n!=='R' && n!=='T' && isLiveBlocked()){
+    pendingSpecTarget = n;
+    const overlay = document.getElementById('liveClosedOverlay');
+    if(overlay) overlay.style.display='flex';
+    return;
+  }
+  if(n==='T') goTo('T'); else goTo(n);
 };
 
 window.toggleRules = function(){
@@ -1453,6 +1540,7 @@ function renderFinal(){
 window.toggleLiveOpen = async function(){
   if(!isAdmin()) return;
   const newVal = !ST.liveOpen;
+  handleLiveOpenChange(newVal);
   await saveTournament({ liveOpen: newVal });
 };
 function updateLiveToggleBtn(){
