@@ -2168,9 +2168,9 @@ html,body{ height:100%; background:var(--s0); color:var(--ink); font-family:'Exo
 .admin-panel-ttl{ font-family:'Oswald',sans-serif;font-size:16px;letter-spacing:1px;color:var(--ylw);margin-bottom:12px; }
 
 /* ── SPECTATOR NAV ───────────────────────────────────── */
-.spec-nav{ display:none;background:var(--s1);border-bottom:3px solid var(--bdr2);padding:0 16px;overflow-x:auto; }
+.spec-nav{ display:none;background:var(--s1);border-bottom:3px solid var(--bdr2);padding:0 8px;overflow-x:auto;white-space:nowrap; }
 .spec-nav.visible{ display:flex;gap:0;align-items:center; }
-.spec-nav-btn{ padding:13px 22px;font-family:'Oswald',sans-serif;font-size:14px;letter-spacing:.8px;text-transform:uppercase;color:var(--muted);background:none;border:none;border-bottom:3px solid transparent;cursor:pointer;transition:all .15s;margin-bottom:-3px; }
+.spec-nav-btn{ padding:13px 14px;font-family:'Oswald',sans-serif;font-size:13px;letter-spacing:.6px;text-transform:uppercase;color:var(--muted);background:none;border:none;border-bottom:3px solid transparent;cursor:pointer;transition:all .15s;margin-bottom:-3px;white-space:nowrap;flex-shrink:0; }
 .spec-nav-btn:hover{ color:var(--ink); }
 .spec-nav-btn.spec-nav-active{ color:var(--blu);border-bottom-color:var(--blu); }
 .spec-nav-live-dot{ width:7px;height:7px;border-radius:50%;background:#ff4444;animation:blink 1.2s ease-in-out infinite;display:inline-block;margin-right:5px; }
@@ -2524,12 +2524,8 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
 
 <!-- BARRE SPECTATEUR -->
 <nav class="spec-nav" id="specNav">
-  <button class="spec-nav-btn spec-nav-active" data-target="4" onclick="spectatorGoLive(4)">
-    <span class="spec-nav-live-dot"></span> Live
-  </button>
-  <button class="spec-nav-btn" data-target="5" onclick="spectatorGoLive(5)">
-    🏆 Classement
-  </button>
+  <button class="spec-nav-btn spec-nav-active" data-target="4" onclick="spectatorGoLive(4)"><span class="spec-nav-live-dot"></span> Live</button>
+  <button class="spec-nav-btn" data-target="5" onclick="spectatorGoLive(5)">🏆 Classement</button>
   <button class="spec-nav-btn" onclick="spectatorGoLive('T')">👥 Équipes</button>
   <button class="spec-nav-btn" onclick="toggleRules()">📋 Règlement</button>
   <button class="spec-nav-btn" onclick="logout()" style="margin-left:auto;color:var(--red)">🔑 Connexion Staff</button>
