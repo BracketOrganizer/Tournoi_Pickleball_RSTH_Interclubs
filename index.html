@@ -134,8 +134,8 @@ onAuthStateChanged(auth, async (user)=>{
     CURRENT_USER = null; USER_ROLE = null;
     unsubAll();
     try {
-      const snap = await getDoc(doc(db,'interclub','current'));
-      if(snap.exists()) ST.liveOpen = snap.data().liveOpen === true;
+      const snap = await getDoc(doc(db,'interclub','status'));
+      if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
     } catch(e){}
     showLogin();
   }
@@ -173,7 +173,8 @@ window.enterLiveModeAndGo = async function(target){
     const snap = await getDoc(doc(db,'interclub','status'));
     if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
   } catch(e){ console.warn('enterLiveModeAndGo: relecture liveOpen échouée', e); }
-  if(target !== 'R' && target !== 'T' && !ST.liveOpen){
+  // Toutes les cibles sauf Règlement sont bloquées si le live est fermé
+  if(target !== 'R' && !ST.liveOpen){
     pendingSpecTarget = target;
     const overlay = document.getElementById('liveClosedOverlay');
     if(overlay) overlay.style.display='flex';
@@ -204,7 +205,8 @@ function handleLiveOpenChange(nowOpen){
     if(isInApp && (USER_ROLE === 'spectator' || USER_ROLE === null)){
       const overlay = document.getElementById('liveClosedOverlay');
       if(overlay) overlay.style.display = 'flex';
-      pendingSpecTarget = typeof ST.page === 'number' ? ST.page : 4;
+      // Mémoriser la page courante (peut être 'T' pour Équipes ou un nombre)
+      pendingSpecTarget = ST.page;
     }
     return;
   }
@@ -217,7 +219,7 @@ function handleLiveOpenChange(nowOpen){
     if(USER_ROLE === 'spectator'){
       if(target === 'R') toggleRules();
       else if(target === 'T') goTo('T');
-      else goTo(target);
+      else goTo(typeof target === 'number' ? target : 4);
     } else {
       enterLiveModeAndGo(target);
     }
@@ -472,7 +474,8 @@ window.spectatorGoLive = async function(n){
     const snap = await getDoc(doc(db,'interclub','status'));
     if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
   } catch(e){ console.warn('spectatorGoLive: relecture liveOpen échouée', e); }
-  if(n!=='R' && n!=='T' && isLiveBlocked()){
+  // Toutes les cibles sauf Règlement sont bloquées si le live est fermé
+  if(n!=='R' && isLiveBlocked()){
     pendingSpecTarget = n;
     const overlay = document.getElementById('liveClosedOverlay');
     if(overlay) overlay.style.display='flex';
@@ -484,9 +487,10 @@ window.spectatorGoLive = async function(n){
 window.toggleRules = function(){
   ST.rulesOpen=!ST.rulesOpen;
   if(!ST.rulesOpen && isLiveBlocked()){
-    document.getElementById('appScreen').style.display='none';
-    document.getElementById('loginScreen').style.display='block';
-    CURRENT_USER=null; USER_ROLE=null;
+    // Live fermé : retourner à l'overlay "live fermé" plutôt que déconnecter
+    const overlay = document.getElementById('liveClosedOverlay');
+    if(overlay) overlay.style.display = 'flex';
+    pendingSpecTarget = 4; // retour à la page Live à la réouverture
     return;
   }
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
