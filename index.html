@@ -2157,13 +2157,13 @@ html,body{ height:100%; background:var(--s0); color:var(--ink); font-family:'Exo
 .hdr-menu-btn.open span:nth-child(1){ transform:translateY(7px) rotate(45deg); }
 .hdr-menu-btn.open span:nth-child(2){ opacity:0;transform:scaleX(0); }
 .hdr-menu-btn.open span:nth-child(3){ transform:translateY(-7px) rotate(-45deg); }
-.hdr-drawer{ display:none;position:fixed;top:58px;right:0;width:240px;background:var(--s1);border-left:1px solid rgba(255,255,255,.15);border-bottom:1px solid rgba(255,255,255,.15);border-radius:0 0 0 14px;box-shadow:-4px 4px 24px rgba(0,0,0,.4);z-index:299;flex-direction:column;padding:8px;gap:4px; }
+.hdr-drawer{ display:none;position:fixed;top:58px;right:0;width:240px;background:#1e2a3a;border-left:1px solid rgba(255,255,255,.1);border-bottom:1px solid rgba(255,255,255,.1);border-radius:0 0 0 14px;box-shadow:-4px 8px 28px rgba(0,0,0,.35);z-index:299;flex-direction:column;padding:8px;gap:4px; }
 .hdr-drawer.open{ display:flex;animation:drawerIn .2s ease; }
 @keyframes drawerIn{ from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none} }
-.hdr-drawer-btn{ background:none;border:none;color:#fff;padding:13px 16px;border-radius:8px;cursor:pointer;font-family:'Exo 2',sans-serif;font-size:14px;font-weight:600;text-align:left;width:100%;display:flex;align-items:center;gap:10px;transition:background .15s; }
-.hdr-drawer-btn:hover{ background:rgba(255,255,255,.12); }
+.hdr-drawer-btn{ background:none;border:none;color:#e8edf8;padding:13px 16px;border-radius:8px;cursor:pointer;font-family:'Exo 2',sans-serif;font-size:14px;font-weight:600;text-align:left;width:100%;display:flex;align-items:center;gap:10px;transition:background .15s; }
+.hdr-drawer-btn:hover{ background:rgba(255,255,255,.1); }
 .hdr-drawer-btn.drawer-danger{ color:#ff8070; }
-.hdr-drawer-sep{ height:1px;background:rgba(255,255,255,.1);margin:4px 0; }
+.hdr-drawer-sep{ height:1px;background:rgba(255,255,255,.12);margin:4px 0; }
 .hdr-drawer-overlay{ display:none;position:fixed;inset:0;z-index:298; }
 .hdr-drawer-overlay.open{ display:block; }
 
