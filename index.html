@@ -402,6 +402,13 @@ function updateStepVisibility(){
 
 // ── Navigation ─────────────────────────────────────────
 window.goTo = function(n){
+  // Bloquer l'accès aux pages de contenu pour un spectateur si le live est fermé
+  if(isLiveBlocked() && n!=='R' && n!=='T'){
+    pendingSpecTarget = n;
+    const overlay = document.getElementById('liveClosedOverlay');
+    if(overlay) overlay.style.display='flex';
+    return;
+  }
   ST.prevPage=ST.page; ST.page=n;
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   if(n==='T'){
@@ -2837,7 +2844,7 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
 
   <!-- BOUTON FIN -->
   <div id="btnFinDiv" style="display:none;margin-top:18px" class="flex g8 fw">
-    <button class="btn btn-g" style="font-size:17px;padding:12px 28px" onclick="goTo(5)">🏆 Voir le classement final →</button>
+    <button class="btn btn-g" style="font-size:17px;padding:12px 28px" onclick="isLiveBlocked()?spectatorGoLive(5):goTo(5)">🏆 Voir le classement final →</button>
   </div>
   <!-- RÉINIT SCORES -->
   <div style="margin-top:10px" data-role="admin">
