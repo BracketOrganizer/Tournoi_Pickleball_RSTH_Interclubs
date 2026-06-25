@@ -2160,7 +2160,7 @@ html,body{ height:100%; background:var(--s0); color:var(--ink); font-family:'Exo
 .hdr-drawer{ display:none;position:fixed;top:58px;right:0;width:240px;background:#1e2a3a;border-left:1px solid rgba(255,255,255,.1);border-bottom:1px solid rgba(255,255,255,.1);border-radius:0 0 0 14px;box-shadow:-4px 8px 28px rgba(0,0,0,.35);z-index:299;flex-direction:column;padding:8px;gap:4px; }
 .hdr-drawer.open{ display:flex;animation:drawerIn .2s ease; }
 @keyframes drawerIn{ from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none} }
-.hdr-drawer-btn{ background:none;border:none;color:#e8edf8;padding:13px 16px;border-radius:8px;cursor:pointer;font-family:'Exo 2',sans-serif;font-size:14px;font-weight:600;text-align:left;width:100%;display:flex;align-items:center;gap:10px;transition:background .15s; }
+.hdr-drawer-btn{ background:none;border:none;color:#e8edf8;padding:13px 16px;border-radius:8px;cursor:pointer;font-family:'Oswald',sans-serif;font-size:15px;font-weight:600;letter-spacing:.5px;text-align:left;width:100%;display:block;transition:background .15s; }
 .hdr-drawer-btn:hover{ background:rgba(255,255,255,.1); }
 .hdr-drawer-btn.drawer-danger{ color:#ff8070; }
 .hdr-drawer-sep{ height:1px;background:rgba(255,255,255,.12);margin:4px 0; }
@@ -2471,13 +2471,13 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
 
 <div class="hdr-drawer-overlay" id="menuOverlay" onclick="closeMobileMenu()"></div>
 <div class="hdr-drawer" id="mobileDrawer">
-  <button class="hdr-drawer-btn" onclick="closeMobileMenu();toggleRules()">📋 Règlement</button>
-  <button class="hdr-drawer-btn" id="drawerLiveBtn" data-role="scorer" onclick="closeMobileMenu();goToLive()" style="display:none">📺 Live</button>
-  <button class="hdr-drawer-btn" id="drawerAdminBtn" data-role="admin" onclick="closeMobileMenu();toggleAdminPanel()" style="display:none">👑 Admin</button>
-  <button class="hdr-drawer-btn" id="drawerBackBtn" style="display:none" onclick="closeMobileMenu();goBack()">← Retour</button>
-  <button class="hdr-drawer-btn" id="drawerFwdBtn" style="display:none" onclick="closeMobileMenu();goFwd()">Suivant →</button>
+  <button class="hdr-drawer-btn" onclick="closeMobileMenu();toggleRules()">📋&nbsp; Règlement</button>
+  <button class="hdr-drawer-btn" id="drawerLiveBtn" data-role="scorer" onclick="closeMobileMenu();goToLive()" style="display:none">📺&nbsp; Live</button>
+  <button class="hdr-drawer-btn" id="drawerAdminBtn" data-role="admin" onclick="closeMobileMenu();toggleAdminPanel()" style="display:none">👑&nbsp; Admin</button>
+  <button class="hdr-drawer-btn" id="drawerBackBtn" style="display:none" onclick="closeMobileMenu();goBack()">← &nbsp;Retour</button>
+  <button class="hdr-drawer-btn" id="drawerFwdBtn" style="display:none" onclick="closeMobileMenu();goFwd()">→ &nbsp;Suivant</button>
   <div class="hdr-drawer-sep"></div>
-  <button class="hdr-drawer-btn drawer-danger" id="drawerLogoutBtn" onclick="closeMobileMenu();logout()">⏻ Quitter</button>
+  <button class="hdr-drawer-btn drawer-danger" id="drawerLogoutBtn" onclick="closeMobileMenu();logout()">⏻&nbsp; Quitter</button>
 </div>
 
 <!-- PANNEAU ADMIN -->
