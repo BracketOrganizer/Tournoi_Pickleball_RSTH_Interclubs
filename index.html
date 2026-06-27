@@ -1718,15 +1718,25 @@ window.tvExit = function(){
 };
 
 function tvMatchRowHTML(m, isLive){
-  const aName = m.aId ? tName(m.aId) : '<em>à déterminer</em>';
-  const bName = m.bId ? tName(m.bId) : '<em>à déterminer</em>';
+  const aT = m.aId ? tObj(m.aId) : null;
+  const bT = m.bId ? tObj(m.bId) : null;
+  const aName = aT ? aT.name : '<em>à déterminer</em>';
+  const bName = bT ? bT.name : '<em>à déterminer</em>';
+  const aPlayers = aT ? `${aT.p1} · ${aT.p2}` : '';
+  const bPlayers = bT ? `${bT.p1} · ${bT.p2}` : '';
   const score = m.done ? `${m.r.ga} – ${m.r.gb}` : (isLive ? 'en cours' : '–');
   return `<div class="tv-match-row ${isLive?'tv-match-live':''}">
     <div class="tv-match-meta"><span>${m.label}</span><span class="tv-match-time">${m.time||''}</span></div>
     <div class="tv-match-teams">
-      <span class="tv-team">${aName}</span>
+      <div class="tv-team">
+        <div class="tv-team-nm">${aName}</div>
+        ${aPlayers?`<div class="tv-team-players">${aPlayers}</div>`:''}
+      </div>
       <span class="tv-score">${score}</span>
-      <span class="tv-team tv-team-r">${bName}</span>
+      <div class="tv-team tv-team-r">
+        <div class="tv-team-nm">${bName}</div>
+        ${bPlayers?`<div class="tv-team-players">${bPlayers}</div>`:''}
+      </div>
     </div>
   </div>`;
 }
@@ -1759,7 +1769,7 @@ function tvStandingsHTML(){
       const gd=s.gf-s.ga;
       return `<tr class="${i<3?'tv-podium-'+(i+1):''}">
         <td class="tv-place">${med[i]||i+1}</td>
-        <td class="tv-team-name">${s.name}${s.club&&s.club!=='—'?` <span style="font-size:.65em;opacity:.7">(${s.club})</span>`:''}</td>
+        <td class="tv-team-name">${s.name}${s.club&&s.club!=='—'?` <span style="font-size:.6em;opacity:.7">(${s.club})</span>`:''}<div style="font-size:.55em;font-weight:400;opacity:.65;margin-top:2px">${s.p1} · ${s.p2}</div></td>
         <td style="text-align:center">${s.played}</td>
         <td style="text-align:center">${s.w}</td>
         <td style="text-align:center">${s.d}</td>
@@ -2708,6 +2718,8 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
 .tv-match-teams{ display:flex; align-items:center; gap:10px; }
 .tv-team{ flex:1; font-family:'Oswald',sans-serif; font-weight:700; font-size:clamp(15px,1.8vw,22px); }
 .tv-team-r{ text-align:right; }
+.tv-team-nm{ font-weight:700; }
+.tv-team-players{ font-family:Arial,sans-serif; font-size:.5em; font-weight:400; color:rgba(255,255,255,.6); margin-top:2px; letter-spacing:.2px; }
 .tv-score{ font-family:'Oswald',sans-serif; font-weight:700; font-size:clamp(18px,2.4vw,30px); color:#ffd27a; white-space:nowrap; padding:0 6px; }
 
 .tv-empty{ text-align:center; color:rgba(255,255,255,.5); padding:30px; font-size:clamp(14px,1.6vw,18px); }
