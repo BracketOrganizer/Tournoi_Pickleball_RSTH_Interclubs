@@ -1586,10 +1586,11 @@ function getTVSettings(){
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem('tvSettings')||'{}'); } catch(e){}
   return {
-    mode:     saved.mode     || 'cycle', // 'results' | 'standings' | 'cycle'
-    interval: saved.interval || 12,       // secondes entre 2 bascules en mode 'cycle'
-    hidden:   saved.hidden   || false,    // barre de réglages masquée
-    scroll:   (saved.scroll===undefined) ? true : saved.scroll // défilement auto si le contenu dépasse l'écran
+    mode:              saved.mode              || 'cycle', // 'results' | 'standings' | 'cycle'
+    intervalMatches:   saved.intervalMatches    || 12,       // secondes d'affichage des écrans "matchs" (en cours / à venir)
+    intervalStandings: saved.intervalStandings  || 20,       // secondes d'affichage de l'écran "classement" (plus long, table à lire)
+    hidden:            saved.hidden             || false,    // barre de réglages masquée
+    scroll:            (saved.scroll===undefined) ? true : saved.scroll // défilement auto si le contenu dépasse l'écran
   };
 }
 function saveTVSettings(patch){
@@ -1601,26 +1602,37 @@ function saveTVSettings(patch){
 function startTVCycle(){
   stopTVCycle();
   tvScreenIndex = 0;
-  const cfg = getTVSettings();
-  const sec = Math.max(5, +cfg.interval || 12);
-  // On programme toujours une avancée périodique : en mode 'cycle' ça
-  // alterne le tour en cours et le classement ; en mode 'results' ou
-  // 'standings' ça n'avance qu'entre écrans du même type (ex : pages 1/2,
-  // 2/2 d'un tour à plus de 12 matchs).
-  tvCycleIv = setInterval(()=>{
-    const screens = getActiveTVScreens();
-    if(screens.length>1){
-      tvScreenIndex = (tvScreenIndex+1) % screens.length;
-      renderTVContent();
-    }
-  }, sec*1000);
   tvClockIv = setInterval(updateTVClock, 1000);
   updateTVClock();
+  // L'avancement lui-même est (re)planifié par scheduleTVAdvance(), appelée
+  // à la fin de renderTVContent() — ainsi le délai appliqué est toujours
+  // celui de l'écran ACTUELLEMENT affiché (résultats/à venir = court,
+  // classement = plus long), et chaque mise à jour live redonne un plein
+  // temps de lecture.
 }
 function stopTVCycle(){
-  if(tvCycleIv){ clearInterval(tvCycleIv); tvCycleIv=null; }
+  if(tvCycleIv){ clearTimeout(tvCycleIv); tvCycleIv=null; }
   if(tvClockIv){ clearInterval(tvClockIv); tvClockIv=null; }
   stopTVAutoScroll();
+}
+// Programme la bascule vers l'écran suivant, avec une durée qui dépend du
+// type de l'écran actuellement affiché (kind 'standings' → intervalStandings,
+// sinon → intervalMatches). Ne programme rien s'il n'y a qu'un seul écran
+// disponible (rien à faire défiler).
+function scheduleTVAdvance(){
+  if(tvCycleIv){ clearTimeout(tvCycleIv); tvCycleIv=null; }
+  const screens = getActiveTVScreens();
+  if(screens.length<=1) return;
+  const current = screens[Math.min(tvScreenIndex, screens.length-1)];
+  const cfg = getTVSettings();
+  const sec = (current && current.kind==='standings')
+    ? Math.max(5, +cfg.intervalStandings || 20)
+    : Math.max(5, +cfg.intervalMatches || 12);
+  tvCycleIv = setTimeout(()=>{
+    const screens2 = getActiveTVScreens();
+    if(screens2.length>1) tvScreenIndex = (tvScreenIndex+1) % screens2.length;
+    renderTVContent(); // se charge elle-même de re-planifier via scheduleTVAdvance()
+  }, sec*1000);
 }
 function updateTVClock(){
   const el=document.getElementById('tvClock'); if(!el) return;
@@ -1696,15 +1708,20 @@ function renderTVSettingsUI(){
   if(tab) tab.style.display = cfg.hidden ? 'flex' : 'none';
   const modeSel = document.getElementById('tvModeSelect');
   if(modeSel) modeSel.value = cfg.mode;
-  const ivWrap = document.getElementById('tvIntervalWrap');
-  if(ivWrap) ivWrap.style.display = cfg.mode==='cycle' ? '' : 'none';
-  const ivInput = document.getElementById('tvIntervalInput');
-  if(ivInput) ivInput.value = cfg.interval;
+  const ivmWrap = document.getElementById('tvIntervalMatchesWrap');
+  if(ivmWrap) ivmWrap.style.display = cfg.mode==='standings' ? 'none' : '';
+  const ivsWrap = document.getElementById('tvIntervalStandingsWrap');
+  if(ivsWrap) ivsWrap.style.display = cfg.mode==='results' ? 'none' : '';
+  const ivmInput = document.getElementById('tvIntervalMatchesInput');
+  if(ivmInput) ivmInput.value = cfg.intervalMatches;
+  const ivsInput = document.getElementById('tvIntervalStandingsInput');
+  if(ivsInput) ivsInput.value = cfg.intervalStandings;
   const scrollChk = document.getElementById('tvScrollToggle');
   if(scrollChk) scrollChk.checked = cfg.scroll;
 }
 window.tvSetMode = function(v){ saveTVSettings({ mode:v }); startTVCycle(); renderTVPage(); };
-window.tvSetInterval = function(v){ saveTVSettings({ interval: Math.max(5,+v||12) }); startTVCycle(); };
+window.tvSetIntervalMatches = function(v){ saveTVSettings({ intervalMatches: Math.max(5,+v||12) }); scheduleTVAdvance(); };
+window.tvSetIntervalStandings = function(v){ saveTVSettings({ intervalStandings: Math.max(5,+v||20) }); scheduleTVAdvance(); };
 window.tvSetScroll = function(v){ saveTVSettings({ scroll: !!v }); startTVAutoScroll(); };
 window.tvToggleHidden = function(){ saveTVSettings({ hidden: !getTVSettings().hidden }); renderTVSettingsUI(); };
 window.tvToggleFullscreen = function(){
@@ -1782,8 +1799,8 @@ function tvStandingsHTML(){
 }
 
 // Construit la liste ordonnée des "écrans" disponibles : le tour en cours
-// (sur 1 ou 2 salles, paginé si plus de 12 matchs au total), suivi du
-// classement général.
+// (sur 1 ou 2 salles, paginé si plus de 12 matchs au total), un aperçu du
+// tour suivant (sans scores, juste les affiches), puis le classement général.
 function getTVScreens(){
   const screens = [];
   const curR = tvCurrentRoundIndex();
@@ -1820,16 +1837,54 @@ function getTVScreens(){
       render: ()=>tvMatchGridHTML(page, isLiveNow)
     });
   }
+
+  // Aperçu du tour suivant (affiches sans scores) — utile pour que les
+  // équipes sachent qui elles vont affronter et sur quel terrain pendant
+  // que le tour en cours se termine.
+  const nextR = curR+1;
+  if(nextR < ST.schedule.length){
+    const rdNext = ST.schedule[nextR];
+    const flatNext = [];
+    rdNext.halls.forEach(h=>{
+      h.matches.forEach((m,localMi)=>{
+        flatNext.push({
+          label: (h.label?h.label+' · ':'')+'Terrain '+(localMi+1),
+          time: rdNext.roundTime||'',
+          aId: m.tA, bId: m.tB, r:{ga:'',gb:''}, done:false
+        });
+      });
+    });
+    const sessionIconNext = rdNext.session==='morning' ? '☀️' : '🌤️';
+    const roundLabelNext = rdNext.waveLabel || `Tour ${nextR+1}`;
+    const pageCountNext = Math.max(1, Math.ceil(flatNext.length/TV_PAGE_SIZE));
+    for(let i=0;i<pageCountNext;i++){
+      const page = flatNext.slice(i*TV_PAGE_SIZE,(i+1)*TV_PAGE_SIZE);
+      screens.push({
+        key:'next-'+nextR+'-'+i, kind:'upcoming',
+        title: pageCountNext>1 ? `⏭️ À venir : ${sessionIconNext} ${roundLabelNext} (${i+1}/${pageCountNext})` : `⏭️ À venir : ${sessionIconNext} ${roundLabelNext}`,
+        render: ()=>{
+          let html = tvMatchGridHTML(page, ()=>false);
+          if(i===0 && rdNext.subs && rdNext.subs.length){
+            html = `<div class="tv-section-ttl" style="color:#ffd27a">🟡 Exempt${rdNext.subs.length>1?'s':''} ce tour-là : ${rdNext.subs.map(id=>tName(id)).join(' · ')}</div>` + html;
+          }
+          return html;
+        }
+      });
+    }
+  }
+
   screens.push({ key:'standings', kind:'standings', title:'🏆 Classement Général', render: tvStandingsHTML });
   return screens;
 }
 // Applique le filtre du réglage "Affichage" (Résultats / Classement / Alterné).
+// "Résultats" inclut aussi l'aperçu du tour suivant (ce n'est pas un
+// classement, ça reste de l'info "matchs").
 function getActiveTVScreens(){
   const screens = getTVScreens();
   const cfg = getTVSettings();
-  if(cfg.mode==='results')   return screens.filter(s=>s.kind==='matches');
+  if(cfg.mode==='results')   return screens.filter(s=>s.kind==='matches'||s.kind==='upcoming');
   if(cfg.mode==='standings') return screens.filter(s=>s.kind==='standings');
-  return screens; // 'cycle' : tour en cours (jusqu'à la fin de ses résultats) ↔ classement général
+  return screens; // 'cycle' : tour en cours → aperçu du tour suivant → classement général
 }
 
 function renderTVContent(){
