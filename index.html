@@ -1920,6 +1920,7 @@ function renderTVContent(){
   // requestAnimationFrame : on attend que la mise en page du nouveau contenu
   // soit posée avant de calculer la position de la ligne "en cours".
   requestAnimationFrame(startTVAutoScroll);
+  scheduleTVAdvance(); // (re)programme la prochaine bascule avec la durée propre à cet écran
 }
 
 // ══════════════════════════════════════════════════════════
@@ -3522,8 +3523,10 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
         <option value="cycle">Alterné (les deux)</option>
       </select>
     </label>
-    <label id="tvIntervalWrap">Toutes les <input type="number" id="tvIntervalInput" min="5" max="120" value="12" style="width:55px"
-      onchange="tvSetInterval(this.value)"> sec</label>
+    <label id="tvIntervalMatchesWrap">⚽ Résultats : <input type="number" id="tvIntervalMatchesInput" min="5" max="120" value="12" style="width:55px"
+      onchange="tvSetIntervalMatches(this.value)"> sec</label>
+    <label id="tvIntervalStandingsWrap">🏆 Classement : <input type="number" id="tvIntervalStandingsInput" min="5" max="180" value="20" style="width:55px"
+      onchange="tvSetIntervalStandings(this.value)"> sec</label>
     <label><input type="checkbox" id="tvScrollToggle" checked onchange="tvSetScroll(this.checked)"> 🔃 Défilement auto</label>
     <button onclick="tvToggleFullscreen()">⛶ Plein écran</button>
     <button onclick="tvToggleHidden()">🙈 Masquer la barre</button>
