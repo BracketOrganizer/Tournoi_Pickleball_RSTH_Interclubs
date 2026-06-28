@@ -59,6 +59,7 @@ let tvClockIv = null;   // intervalle de mise à jour de l'horloge en mode Écra
 let tvScrollIv = null;  // intervalle du défilement automatique en mode Écran
 let tvScreenIndex = 0;  // index de l'écran actuellement affiché parmi les écrans disponibles (mode Écran)
 let tvLastScreensSig = null; // signature de la dernière liste d'écrans actifs, pour détecter un changement de tour et repartir au début
+let tvLastRenderedKey = null; // clé du dernier écran réellement affiché, pour distinguer un changement d'écran d'une simple actualisation de données
 
 const ST = {
   page:1, prevPage:1, rulesOpen:false,
@@ -1602,6 +1603,7 @@ function saveTVSettings(patch){
 function startTVCycle(){
   stopTVCycle();
   tvScreenIndex = 0;
+  tvLastRenderedKey = null; // on force un "vrai changement d'écran" au tout premier rendu de cette session
   tvClockIv = setInterval(updateTVClock, 1000);
   updateTVClock();
   // L'avancement lui-même est (re)planifié par scheduleTVAdvance(), appelée
@@ -1910,6 +1912,15 @@ function renderTVContent(){
   const screen = screens[tvScreenIndex];
   const subEl=document.getElementById('tvSubTitle');
 
+  // Un vrai changement d'écran justifie de repartir du début (position de
+  // défilement + minuteur de bascule). Une simple actualisation de données
+  // en direct sur LE MÊME écran (ex : un score rentre pendant qu'on regarde
+  // le classement) ne doit PAS tout réinitialiser — sinon l'écran
+  // Classement, plus long à lire, ne finit jamais de défiler si des scores
+  // rentrent régulièrement pendant ce temps-là.
+  const isScreenChange = !screen || screen.key !== tvLastRenderedKey;
+  tvLastRenderedKey = screen ? screen.key : null;
+
   if(!screen){
     if(subEl) subEl.textContent = '';
     el.innerHTML = `<div class="tv-empty">Rien à afficher pour le moment.</div>`;
@@ -1917,6 +1928,7 @@ function renderTVContent(){
     if(subEl) subEl.textContent = screen.title;
     el.innerHTML = screen.render();
   }
+  if(!isScreenChange) return; // données actualisées en place, on laisse le défilement/minuteur en cours suivre leur cours
   // requestAnimationFrame : on attend que la mise en page du nouveau contenu
   // soit posée avant de calculer la position de la ligne "en cours".
   requestAnimationFrame(startTVAutoScroll);
