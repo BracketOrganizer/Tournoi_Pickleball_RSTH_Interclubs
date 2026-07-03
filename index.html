@@ -2112,7 +2112,7 @@ window.adminCreateUser = async function(){
   const msg=document.getElementById('newUserMsg');
   if(!name||!email||!pwd){ msg.textContent='Tous les champs sont requis.'; msg.style.color='var(--red)'; return; }
   try {
-    const res=await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=AIzaSyAa-It1GI_9KTAvQKzkLWNANv91QnZar04`,
+    const res=await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=AIzaSyAvppGIS7M12LFgaPEuFdo-ed6rrAtgcSc`,
       {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password:pwd,returnSecureToken:true})});
     const data=await res.json();
     if(data.error) throw new Error(data.error.message);
@@ -2178,7 +2178,7 @@ window.adminCreateClub = async function(){
   const msg      = document.getElementById('newClubMsg');
   if(!clubName||!email||!pwd){ msg.textContent='Tous les champs sont requis.'; msg.style.color='var(--red)'; return; }
   try {
-    const res=await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=AIzaSyAa-It1GI_9KTAvQKzkLWNANv91QnZar04`,
+    const res=await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=AIzaSyAvppGIS7M12LFgaPEuFdo-ed6rrAtgcSc`,
       {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password:pwd,returnSecureToken:true})});
     const data=await res.json();
     if(data.error) throw new Error(data.error.message);
