@@ -1857,11 +1857,13 @@ function startTVAutoScroll(){
     if(tvScrollState.phase==='pausedBottom'){
       if(now - tvScrollState.since >= PAUSE_MS){
         el.scrollTop = 0; // on repart du tout début pour finir par montrer l'ensemble des matchs
+        void el.offsetHeight; // force le rafraîchissement visuel (Safari iOS ignore parfois scrollTop en JS sans ça)
         tvScrollState = { phase:'pausedTop', since: now };
       }
       return;
     }
     el.scrollTop += SPEED;
+    void el.offsetHeight; // force le rafraîchissement visuel (Safari iOS ignore parfois scrollTop en JS sans ça)
     if(el.scrollTop >= maxScroll - 1){
       el.scrollTop = maxScroll;
       tvScrollState = { phase:'pausedBottom', since: now };
