@@ -49,6 +49,7 @@ const gProvider = new GoogleAuthProvider();
 // ══════════════════════════════════════════════════════════
 let CURRENT_USER = null;
 let USER_ROLE    = null;
+let USER_ROLES   = [];
 let unsubTournament = null;
 let unsubResults    = null;
 let unsubLiveWatch  = null;
@@ -87,20 +88,24 @@ const ST = {
 };
 
 // ─── Helpers rôle ───────────────────────────────────────
-function isAdmin()  { return USER_ROLE === 'admin'; }
-function isScorer() { return USER_ROLE === 'admin' || USER_ROLE === 'scorer'; }
-function isClub()   { return USER_ROLE === 'club'; }
+function isAdmin()  { return USER_ROLES.includes('admin'); }
+function isScorer() { return USER_ROLES.includes('admin') || USER_ROLES.includes('scorer'); }
+function isClub()   { return USER_ROLES.includes('club'); }
 function isLiveBlocked(){ return USER_ROLE === 'spectator' && !ST.liveOpen; }
 
 // ══════════════════════════════════════════════════════════
 // AUTH
 // ══════════════════════════════════════════════════════════
-async function getUserRole(uid){
+async function getUserProfile(uid){
   try {
     const snap = await getDoc(doc(db,'users',uid));
-    if(snap.exists()) return snap.data().role || 'spectator';
+    if(snap.exists()){
+      const d = snap.data();
+      const roles = Array.isArray(d.roles) && d.roles.length ? d.roles : [d.role || 'spectator'];
+      return { roles, name: d.name||'', clubName: d.clubName||'', maxTeams: d.maxTeams||0 };
+    }
   } catch(e){}
-  return 'spectator';
+  return { roles:['spectator'], name:'', clubName:'', maxTeams:0 };
 }
 async function ensureUserDoc(user){
   const ref  = doc(db,'users',user.uid);
@@ -110,6 +115,7 @@ async function ensureUserDoc(user){
       email: user.email,
       name:  user.displayName || user.email.split('@')[0],
       role:  'spectator',
+      roles: ['spectator'],
       createdAt: serverTimestamp()
     });
   }
@@ -120,29 +126,43 @@ onAuthStateChanged(auth, async (user)=>{
   if(user){
     CURRENT_USER = user;
     await ensureUserDoc(user);
-    USER_ROLE = await getUserRole(user.uid);
-    if(USER_ROLE === 'club'){
+    const profile = await getUserProfile(user.uid);
+    USER_ROLES = profile.roles;
+    CLUB_PROFILE = { clubName: profile.clubName || profile.name || 'Mon club', maxTeams: profile.maxTeams || 0 };
+    const hasStaff = USER_ROLES.includes('admin') || USER_ROLES.includes('scorer');
+    const hasClub  = USER_ROLES.includes('club');
+    // Accès combiné automatique : le staff (admin/scorer) passe toujours par l'appli principale,
+    // avec en plus un accès direct à son espace club s'il a aussi le rôle "club".
+    if(hasStaff){
+      USER_ROLE = USER_ROLES.includes('admin') ? 'admin' : 'scorer';
+      showApp();
+      subscribeToTournament();
+      subscribeToResults();
+      toggleClubExtraNav(hasClub);
+      return;
+    }
+    if(hasClub){
+      USER_ROLE = 'club';
       await showClubScreen();
       return;
     }
-    if(USER_ROLE === 'spectator'){
-      try {
-        const snap = await getDoc(doc(db,'interclub','current'));
-        ST.liveOpen = snap.exists() ? snap.data().liveOpen === true : false;
-      } catch(e){ ST.liveOpen = false; }
-      if(!ST.liveOpen){
-        await signOut(auth);
-        CURRENT_USER = null; USER_ROLE = null;
-        showLogin();
-        showAuthMsg('⏰ Le live n\'est pas encore ouvert.', 'red');
-        return;
-      }
+    USER_ROLE = 'spectator';
+    try {
+      const snap = await getDoc(doc(db,'interclub','current'));
+      ST.liveOpen = snap.exists() ? snap.data().liveOpen === true : false;
+    } catch(e){ ST.liveOpen = false; }
+    if(!ST.liveOpen){
+      await signOut(auth);
+      CURRENT_USER = null; USER_ROLE = null; USER_ROLES = [];
+      showLogin();
+      showAuthMsg('⏰ Le live n\'est pas encore ouvert.', 'red');
+      return;
     }
     showApp();
     subscribeToTournament();
     subscribeToResults();
   } else {
-    CURRENT_USER = null; USER_ROLE = null;
+    CURRENT_USER = null; USER_ROLE = null; USER_ROLES = [];
     unsubAll();
     try {
       const snap = await getDoc(doc(db,'interclub','status'));
@@ -173,7 +193,8 @@ window.loginGoogle = async function(){
 };
 window.logout = async function(){
   clearInterval(ST.timerIv); unsubAll();
-  USER_ROLE = null; CURRENT_USER = null;
+  USER_ROLE = null; USER_ROLES = []; CURRENT_USER = null;
+  toggleClubExtraNav(false);
   if(auth.currentUser) await signOut(auth);
   else showLogin();
 };
@@ -388,21 +409,33 @@ let CLUB_PROFILE = null;   // { clubName, maxTeams }
 let CLUB_TEAMS   = [];     // registrations Firestore du club connecté
 let CLUB_EDIT_ID = null;   // id de l'inscription en cours d'édition (ou null)
 
+window.toggleClubExtraNav = function(show){
+  const b1 = document.getElementById('clubExtraBtn');
+  const b2 = document.getElementById('drawerClubExtraBtn');
+  if(b1) b1.style.display = show ? '' : 'none';
+  if(b2) b2.style.display = show ? '' : 'none';
+};
 async function showClubScreen(){
   document.getElementById('loginScreen').style.display='none';
   document.getElementById('appScreen').style.display='none';
   const cs=document.getElementById('clubScreen');
   if(cs) cs.style.display='block';
-  try {
-    const snap = await getDoc(doc(db,'users',CURRENT_USER.uid));
-    CLUB_PROFILE = snap.exists()
-      ? { clubName: snap.data().clubName || snap.data().name || 'Mon club', maxTeams: snap.data().maxTeams || 0 }
-      : { clubName: 'Mon club', maxTeams: 0 };
-  } catch(e){ CLUB_PROFILE = { clubName: 'Mon club', maxTeams: 0 }; }
+  if(!CLUB_PROFILE) CLUB_PROFILE = { clubName: 'Mon club', maxTeams: 0 };
   const nameEl = document.getElementById('clubHdrName');
   if(nameEl) nameEl.textContent = '🏟️ ' + CLUB_PROFILE.clubName;
+  const hasStaff = USER_ROLES.includes('admin') || USER_ROLES.includes('scorer');
+  const backBtn = document.getElementById('clubBackToAppBtn');
+  const logoutBtn = document.getElementById('clubLogoutBtn');
+  if(backBtn)   backBtn.style.display   = hasStaff ? '' : 'none';
+  if(logoutBtn) logoutBtn.style.display = hasStaff ? 'none' : '';
   await loadClubTeams();
 }
+window.openClubFromApp = function(){ showClubScreen(); };
+window.returnToAppFromClub = function(){
+  const cs=document.getElementById('clubScreen');
+  if(cs) cs.style.display='none';
+  document.getElementById('appScreen').style.display='block';
+};
 async function loadClubTeams(){
   const listEl = document.getElementById('clubTeamsList');
   if(listEl) listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0">Chargement…</div>';
@@ -509,7 +542,7 @@ window.clubDeleteTeam = async function(id){
 };
 window.clubLogout = async function(){
   CLUB_PROFILE = null; CLUB_TEAMS = []; CLUB_EDIT_ID = null;
-  USER_ROLE = null; CURRENT_USER = null;
+  USER_ROLE = null; USER_ROLES = []; CURRENT_USER = null;
   if(auth.currentUser) await signOut(auth);
   else showLogin();
 };
@@ -2103,34 +2136,80 @@ window.toggleAdminPanel = function(){
   const el=document.getElementById('adminPanel');
   el.style.display=el.style.display==='none'?'block':'none';
 };
+window.toggleNewUClubFields = function(){
+  const checked = Array.from(document.querySelectorAll('.newU_roleChk:checked')).map(c=>c.value);
+  const wrap = document.getElementById('newU_clubFields');
+  if(wrap) wrap.style.display = checked.includes('club') ? 'flex' : 'none';
+};
 window.adminCreateUser = async function(){
   if(!isAdmin()) return;
   const name=document.getElementById('newU_name').value.trim();
   const email=document.getElementById('newU_email').value.trim();
   const pwd=document.getElementById('newU_pwd').value;
-  const role=document.getElementById('newU_role').value;
+  const roles=Array.from(document.querySelectorAll('.newU_roleChk:checked')).map(c=>c.value);
   const msg=document.getElementById('newUserMsg');
   if(!name||!email||!pwd){ msg.textContent='Tous les champs sont requis.'; msg.style.color='var(--red)'; return; }
+  if(roles.length===0){ msg.textContent='Sélectionnez au moins un rôle.'; msg.style.color='var(--red)'; return; }
+  let clubName='', maxTeams=0;
+  if(roles.includes('club')){
+    clubName = document.getElementById('newU_club').value.trim();
+    maxTeams = +document.getElementById('newU_maxTeams').value || 0;
+    if(!clubName||maxTeams<1){ msg.textContent='Club et quota (≥1) requis pour un responsable club.'; msg.style.color='var(--red)'; return; }
+  }
   try {
     const res=await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=AIzaSyAvppGIS7M12LFgaPEuFdo-ed6rrAtgcSc`,
       {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password:pwd,returnSecureToken:true})});
     const data=await res.json();
     if(data.error) throw new Error(data.error.message);
-    await setDoc(doc(db,'users',data.localId),{email,name,role,createdAt:serverTimestamp(),createdBy:CURRENT_USER.uid});
-    msg.textContent=`✅ Compte créé : ${name} (${role})`; msg.style.color='var(--grn)';
+    const userDoc = { email, name, role: roles[0], roles, createdAt:serverTimestamp(), createdBy:CURRENT_USER.uid };
+    if(roles.includes('club')){ userDoc.clubName = clubName; userDoc.maxTeams = maxTeams; }
+    await setDoc(doc(db,'users',data.localId), userDoc);
+    msg.textContent=`✅ Compte créé : ${name} (${roles.join(', ')})`; msg.style.color='var(--grn)';
     ['newU_name','newU_email','newU_pwd'].forEach(id=>document.getElementById(id).value='');
+    document.querySelectorAll('.newU_roleChk').forEach(c=>c.checked=false);
+    toggleNewUClubFields();
     setTimeout(()=>{ msg.textContent=''; },4000);
+  } catch(e){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; }
+};
+window.toggleChgUClubFields = function(){
+  const checked = Array.from(document.querySelectorAll('.chgU_roleChk:checked')).map(c=>c.value);
+  const wrap = document.getElementById('chgU_clubFields');
+  if(wrap) wrap.style.display = checked.includes('club') ? 'flex' : 'none';
+};
+window.loadUserRolesIntoForm = async function(){
+  if(!isAdmin()) return;
+  const uid = document.getElementById('adminUidInput').value.trim();
+  const msg = document.getElementById('adminRoleMsg');
+  if(!uid){ msg.textContent='UID requis.'; msg.style.color='var(--red)'; return; }
+  try {
+    const snap = await getDoc(doc(db,'users',uid));
+    if(!snap.exists()){ msg.textContent='❌ Utilisateur introuvable.'; msg.style.color='var(--red)'; return; }
+    const d = snap.data();
+    const roles = Array.isArray(d.roles) && d.roles.length ? d.roles : [d.role || 'spectator'];
+    document.querySelectorAll('.chgU_roleChk').forEach(c=> c.checked = roles.includes(c.value));
+    document.getElementById('chgU_club').value = d.clubName || '';
+    document.getElementById('chgU_maxTeams').value = d.maxTeams || 2;
+    toggleChgUClubFields();
+    msg.textContent = `✅ Rôles actuels chargés : ${roles.join(', ')}`; msg.style.color='var(--grn)';
   } catch(e){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; }
 };
 window.setUserRole = async function(){
   if(!isAdmin()) return;
   const uid=document.getElementById('adminUidInput').value.trim();
-  const role=document.getElementById('adminRoleSelect').value;
+  const roles=Array.from(document.querySelectorAll('.chgU_roleChk:checked')).map(c=>c.value);
   const msg=document.getElementById('adminRoleMsg');
   if(!uid){ msg.textContent='UID requis.'; msg.style.color='var(--red)'; return; }
+  if(roles.length===0){ msg.textContent='Sélectionnez au moins un rôle.'; msg.style.color='var(--red)'; return; }
+  const update = { role: roles[0], roles };
+  if(roles.includes('club')){
+    const clubName = document.getElementById('chgU_club').value.trim();
+    const maxTeams = +document.getElementById('chgU_maxTeams').value || 0;
+    if(!clubName||maxTeams<1){ msg.textContent='Club et quota (≥1) requis pour un responsable club.'; msg.style.color='var(--red)'; return; }
+    update.clubName = clubName; update.maxTeams = maxTeams;
+  }
   try {
-    await updateDoc(doc(db,'users',uid),{role});
-    msg.textContent=`✅ Rôle mis à jour.`; msg.style.color='var(--grn)';
+    await setDoc(doc(db,'users',uid), update, { merge:true });
+    msg.textContent=`✅ Rôle(s) mis à jour.`; msg.style.color='var(--grn)';
     setTimeout(()=>{ msg.textContent=''; },3000);
   } catch(e){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; }
 };
@@ -2145,12 +2224,14 @@ window.loadUserList = async function(){
     listEl.innerHTML='';
     snap.forEach(d=>{
       const u=d.data(); const uid=d.id;
-      const roleIcon={admin:'👑',scorer:'✏️',spectator:'👁'}[u.role]||'?';
+      const roleIconMap={admin:'👑',scorer:'✏️',spectator:'👁',club:'🏟️'};
+      const roles = Array.isArray(u.roles) && u.roles.length ? u.roles : [u.role||'spectator'];
+      const rolesDisplay = roles.map(r=>`${roleIconMap[r]||'?'} ${r}`).join(' · ');
       const tr=document.createElement('tr');
       tr.style.cssText='border-bottom:1px solid var(--bdr);font-size:13px';
       tr.innerHTML=`<td style="padding:8px 6px;font-weight:600">${u.name||'—'}</td>
         <td style="padding:8px 6px;color:var(--muted);font-size:12px">${u.email||'—'}</td>
-        <td style="padding:8px 6px">${roleIcon} ${u.role||'—'}</td>
+        <td style="padding:8px 6px">${rolesDisplay}</td>
         <td style="padding:8px 6px;text-align:center">
           <button onclick="deleteUserFromList('${uid}')" style="background:none;border:1px solid var(--red);color:var(--red);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px">Suppr.</button>
         </td>`;
@@ -2182,7 +2263,7 @@ window.adminCreateClub = async function(){
       {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password:pwd,returnSecureToken:true})});
     const data=await res.json();
     if(data.error) throw new Error(data.error.message);
-    await setDoc(doc(db,'users',data.localId),{email,clubName,name:clubName,role:'club',maxTeams,createdAt:serverTimestamp(),createdBy:CURRENT_USER.uid});
+    await setDoc(doc(db,'users',data.localId),{email,clubName,name:clubName,role:'club',roles:['club'],maxTeams,createdAt:serverTimestamp(),createdBy:CURRENT_USER.uid});
     msg.textContent=`✅ Compte club créé : ${clubName} (${maxTeams} équipe${maxTeams>1?'s':''} max)`; msg.style.color='var(--grn)';
     ['newC_name','newC_email','newC_pwd'].forEach(id=>document.getElementById(id).value='');
     document.getElementById('newC_max').value='1';
@@ -3173,6 +3254,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
     <button class="hdr-btn" id="liveBtn" data-role="scorer" onclick="goToLive()" style="display:none">📺 Live</button>
     <button class="hdr-btn" id="tvBtn" data-role="scorer" onclick="goTo('TV')" style="display:none">📺 Écran</button>
     <button class="hdr-btn" id="adminBtn" data-role="admin" onclick="toggleAdminPanel()" style="display:none">👑 Admin</button>
+    <button class="hdr-btn" id="clubExtraBtn" onclick="openClubFromApp()" style="display:none">🏟️ Mon club</button>
     <button class="hdr-btn" id="backBtn" style="display:none" onclick="goBack()">← Retour</button>
     <button class="hdr-btn" id="fwdBtn" style="display:none" onclick="goFwd()">Suivant →</button>
     <button class="hdr-btn" id="logoutBtn" onclick="logout()">Quitter</button>
@@ -3188,6 +3270,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
   <button class="hdr-drawer-btn" id="drawerLiveBtn" data-role="scorer" onclick="closeMobileMenu();goToLive()" style="display:none">📺&nbsp; Live</button>
   <button class="hdr-drawer-btn" id="drawerTvBtn" data-role="scorer" onclick="closeMobileMenu();goTo('TV')" style="display:none">📺&nbsp; Écran</button>
   <button class="hdr-drawer-btn" id="drawerAdminBtn" data-role="admin" onclick="closeMobileMenu();toggleAdminPanel()" style="display:none">👑&nbsp; Admin</button>
+  <button class="hdr-drawer-btn" id="drawerClubExtraBtn" onclick="closeMobileMenu();openClubFromApp()" style="display:none">🏟️&nbsp; Mon club</button>
   <button class="hdr-drawer-btn" id="drawerBackBtn" style="display:none" onclick="closeMobileMenu();goBack()">← &nbsp;Retour</button>
   <button class="hdr-drawer-btn" id="drawerFwdBtn" style="display:none" onclick="closeMobileMenu();goFwd()">→ &nbsp;Suivant</button>
   <div class="hdr-drawer-sep"></div>
@@ -3204,22 +3287,50 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
           <div><label>Prénom / Nom</label><input type="text" id="newU_name" placeholder="Marie Dupont"></div>
           <div><label>Email</label><input type="email" id="newU_email" placeholder="marie@exemple.com"></div>
           <div><label>Mot de passe (6 car. min)</label><input type="password" id="newU_pwd" placeholder="••••••••"></div>
-          <div style="display:flex;gap:10px;align-items:flex-end">
-            <div style="flex:1"><label>Rôle</label><select id="newU_role"><option value="scorer">✏️ Scorer</option><option value="spectator">👁 Spectateur</option><option value="admin">👑 Admin</option></select></div>
+          <div>
+            <label>Rôle(s) — plusieurs possibles</label>
+            <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:4px">
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="newU_roleChk" value="scorer" onchange="toggleNewUClubFields()"> ✏️ Scorer</label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="newU_roleChk" value="spectator" onchange="toggleNewUClubFields()"> 👁 Spectateur</label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="newU_roleChk" value="club" onchange="toggleNewUClubFields()"> 🏟️ Responsable club</label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="newU_roleChk" value="admin" onchange="toggleNewUClubFields()"> 👑 Admin</label>
+            </div>
+          </div>
+          <div id="newU_clubFields" style="display:none;gap:10px;flex-direction:column;background:var(--s1);border-radius:8px;padding:10px">
+            <div><label>Nom du club</label><input type="text" id="newU_club" placeholder="Pickleball Club de..."></div>
+            <div><label>Quota d'équipes autorisées</label><input type="number" id="newU_maxTeams" min="1" value="2"></div>
+          </div>
+          <div style="display:flex;justify-content:flex-end">
             <button class="btn btn-g btn-sm" onclick="adminCreateUser()">✓ Créer</button>
           </div>
           <div id="newUserMsg" style="font-size:13px;min-height:18px"></div>
         </div>
       </div>
       <div>
-        <div class="admin-panel-ttl">🔑 Modifier un rôle</div>
+        <div class="admin-panel-ttl">🔑 Modifier le(s) rôle(s)</div>
         <div style="display:flex;flex-direction:column;gap:10px">
-          <div><label>UID utilisateur</label><input type="text" id="adminUidInput" placeholder="Firebase UID"></div>
           <div style="display:flex;gap:10px;align-items:flex-end">
-            <div style="flex:1"><label>Nouveau rôle</label><select id="adminRoleSelect"><option value="admin">👑 Admin</option><option value="scorer" selected>✏️ Scorer</option><option value="spectator">👁 Spectateur</option></select></div>
+            <div style="flex:1"><label>UID utilisateur</label><input type="text" id="adminUidInput" placeholder="Firebase UID"></div>
+            <button class="btn btn-ghost btn-sm" onclick="loadUserRolesIntoForm()">🔄 Charger</button>
+          </div>
+          <div>
+            <label>Rôle(s) — plusieurs possibles</label>
+            <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:4px">
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="chgU_roleChk" value="admin"> 👑 Admin</label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="chgU_roleChk" value="scorer"> ✏️ Scorer</label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="chgU_roleChk" value="spectator"> 👁 Spectateur</label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="chgU_roleChk" value="club" onchange="toggleChgUClubFields()"> 🏟️ Responsable club</label>
+            </div>
+          </div>
+          <div id="chgU_clubFields" style="display:none;gap:10px;flex-direction:column;background:var(--s1);border-radius:8px;padding:10px">
+            <div><label>Nom du club</label><input type="text" id="chgU_club" placeholder="Pickleball Club de..."></div>
+            <div><label>Quota d'équipes autorisées</label><input type="number" id="chgU_maxTeams" min="1" value="2"></div>
+          </div>
+          <div style="display:flex;justify-content:flex-end">
             <button class="btn btn-y btn-sm" onclick="setUserRole()">Appliquer</button>
           </div>
           <div id="adminRoleMsg" style="font-size:13px;min-height:18px"></div>
+          <div style="font-size:11px;color:var(--muted);line-height:1.6">💡 Un même compte peut cumuler plusieurs rôles (ex : Scorer + Responsable club) : l'accès combiné se fait automatiquement à la connexion.</div>
         </div>
       </div>
       <div style="grid-column:1/-1;margin-top:16px;border-top:1px solid var(--bdr);padding-top:16px">
@@ -3875,7 +3986,10 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
 <div id="clubScreen" style="display:none;min-height:100vh;padding:20px 16px 60px;max-width:640px;margin:0 auto">
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;flex-wrap:wrap;gap:10px">
     <div id="clubHdrName" style="font-family:'Oswald',sans-serif;font-size:22px;letter-spacing:.6px;color:var(--ink)">🏟️ Mon club</div>
-    <button class="btn btn-ghost btn-sm" onclick="clubLogout()">⏻ Déconnexion</button>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-ghost btn-sm" id="clubBackToAppBtn" style="display:none" onclick="returnToAppFromClub()">← Retour à l'appli</button>
+      <button class="btn btn-ghost btn-sm" id="clubLogoutBtn" onclick="clubLogout()">⏻ Déconnexion</button>
+    </div>
   </div>
 
   <div style="background:var(--s1);border:1px solid var(--bdr2);border-radius:12px;padding:16px;margin-bottom:20px">
