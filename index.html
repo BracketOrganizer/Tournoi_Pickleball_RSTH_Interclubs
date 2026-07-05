@@ -57,7 +57,8 @@ let liveWatchIv     = null; // polling de secours (mobile en veille)
 let pendingSpecTarget = null;
 let tvCycleIv = null;   // intervalle d'alternance Résultats/Classement en mode Écran
 let tvClockIv = null;   // intervalle de mise à jour de l'horloge en mode Écran
-let tvScrollIv = null;  // intervalle du défilement automatique en mode Écran
+let tvScrollIv = null;  // (obsolète, conservé pour compat clearInterval) intervalle du défilement automatique en mode Écran
+let tvScrollRAF = null; // boucle requestAnimationFrame du défilement automatique (plus fiable que setInterval sur iOS)
 let tvScreenIndex = 0;  // index de l'écran actuellement affiché parmi les écrans disponibles (mode Écran)
 let tvLastScreensSig = null; // signature de la dernière liste d'écrans actifs, pour détecter un changement de tour et repartir au début
 let tvLastRenderedKey = null; // clé du dernier écran réellement affiché, pour distinguer un changement d'écran d'une simple actualisation de données
@@ -1843,35 +1844,39 @@ function startTVAutoScroll(){
   el.scrollTop = startPos;
   tvScrollState = { phase:'pausedTop', since: Date.now() };
   if(getTVSettings().scroll === false) return; // défilement désactivé par l'opérateur
-  const SPEED = 0.7;   // px par tick (≈23 px/s) — lent, pensé pour être lisible
+  const SPEED_PX_PER_SEC = 23; // vitesse de défilement — lent, pensé pour être lisible
   const PAUSE_MS = 2500;
-  tvScrollIv = setInterval(()=>{
-    if(!el.isConnected) return;
+  let lastTs = null;
+  function tick(ts){
+    if(!el.isConnected){ tvScrollRAF = null; return; }
+    if(lastTs === null) lastTs = ts;
+    const dt = ts - lastTs;
+    lastTs = ts;
     const maxScroll = el.scrollHeight - el.clientHeight;
-    if(maxScroll <= 6) return; // tout tient déjà à l'écran
-    const now = Date.now();
-    if(tvScrollState.phase==='pausedTop'){
-      if(now - tvScrollState.since >= PAUSE_MS) tvScrollState = { phase:'scrollingDown', since: now };
-      return;
-    }
-    if(tvScrollState.phase==='pausedBottom'){
-      if(now - tvScrollState.since >= PAUSE_MS){
-        el.scrollTop = 0; // on repart du tout début pour finir par montrer l'ensemble des matchs
-        void el.offsetHeight; // force le rafraîchissement visuel (Safari iOS ignore parfois scrollTop en JS sans ça)
-        tvScrollState = { phase:'pausedTop', since: now };
+    if(maxScroll > 6){
+      const now = Date.now();
+      if(tvScrollState.phase==='pausedTop'){
+        if(now - tvScrollState.since >= PAUSE_MS) tvScrollState = { phase:'scrollingDown', since: now };
+      } else if(tvScrollState.phase==='pausedBottom'){
+        if(now - tvScrollState.since >= PAUSE_MS){
+          el.scrollTop = 0; // on repart du tout début pour finir par montrer l'ensemble des matchs
+          tvScrollState = { phase:'pausedTop', since: now };
+        }
+      } else {
+        el.scrollTop += SPEED_PX_PER_SEC * (dt/1000);
+        if(el.scrollTop >= maxScroll - 1){
+          el.scrollTop = maxScroll;
+          tvScrollState = { phase:'pausedBottom', since: now };
+        }
       }
-      return;
     }
-    el.scrollTop += SPEED;
-    void el.offsetHeight; // force le rafraîchissement visuel (Safari iOS ignore parfois scrollTop en JS sans ça)
-    if(el.scrollTop >= maxScroll - 1){
-      el.scrollTop = maxScroll;
-      tvScrollState = { phase:'pausedBottom', since: now };
-    }
-  }, 30);
+    tvScrollRAF = requestAnimationFrame(tick);
+  }
+  tvScrollRAF = requestAnimationFrame(tick);
 }
 function stopTVAutoScroll(){
   if(tvScrollIv){ clearInterval(tvScrollIv); tvScrollIv=null; }
+  if(tvScrollRAF){ cancelAnimationFrame(tvScrollRAF); tvScrollRAF=null; }
 }
 
 function renderTVPage(){
