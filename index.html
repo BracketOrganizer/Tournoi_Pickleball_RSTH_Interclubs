@@ -1847,6 +1847,12 @@ function startTVAutoScroll(){
   const SPEED_PX_PER_SEC = 23; // vitesse de défilement — lent, pensé pour être lisible
   const PAUSE_MS = 2500;
   let lastTs = null;
+  // Safari iOS arrondit/tronque el.scrollTop à l'entier à CHAQUE écriture : si on
+  // accumule en relisant el.scrollTop (qui vaut donc 0 ou 1 pixel près), les
+  // incréments inférieurs à 1px (0,39px/frame ici) sont perdus à chaque image et
+  // le défilement ne bouge jamais. On garde donc notre propre compteur en
+  // virgule flottante, indépendant de ce que le navigateur affiche/arrondit.
+  let scrollPos = startPos;
   function tick(ts){
     if(!el.isConnected){ tvScrollRAF = null; return; }
     if(lastTs === null) lastTs = ts;
@@ -1859,14 +1865,18 @@ function startTVAutoScroll(){
         if(now - tvScrollState.since >= PAUSE_MS) tvScrollState = { phase:'scrollingDown', since: now };
       } else if(tvScrollState.phase==='pausedBottom'){
         if(now - tvScrollState.since >= PAUSE_MS){
+          scrollPos = 0;
           el.scrollTop = 0; // on repart du tout début pour finir par montrer l'ensemble des matchs
           tvScrollState = { phase:'pausedTop', since: now };
         }
       } else {
-        el.scrollTop += SPEED_PX_PER_SEC * (dt/1000);
-        if(el.scrollTop >= maxScroll - 1){
+        scrollPos += SPEED_PX_PER_SEC * (dt/1000);
+        if(scrollPos >= maxScroll - 1){
+          scrollPos = maxScroll;
           el.scrollTop = maxScroll;
           tvScrollState = { phase:'pausedBottom', since: now };
+        } else {
+          el.scrollTop = scrollPos;
         }
       }
     }
