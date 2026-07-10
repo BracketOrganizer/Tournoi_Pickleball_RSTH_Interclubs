@@ -23,7 +23,7 @@
 <script type="module">
 import { initializeApp }            from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword,
-         createUserWithEmailAndPassword, signInWithPopup, GoogleAuthProvider,
+         createUserWithEmailAndPassword, signInWithRedirect, getRedirectResult, GoogleAuthProvider,
          signOut, updateProfile }   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 import { getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot, collection,
          addDoc, updateDoc, serverTimestamp, query, orderBy, getDocs, where }
@@ -42,6 +42,15 @@ const app       = initializeApp(firebaseConfig);
 const auth      = getAuth(app);
 const db        = getFirestore(app);
 const gProvider = new GoogleAuthProvider();
+
+// Avec signInWithRedirect, la page recharge après l'auth Google : on récupère
+// ici le résultat (ou l'erreur) de cette redirection. onAuthStateChanged plus
+// bas gère la connexion elle-même ; ceci sert uniquement à afficher un message
+// d'erreur clair si Google refuse (compte existant avec autre méthode, etc.).
+getRedirectResult(auth).catch((e)=>{
+  console.warn('getRedirectResult error:', e);
+  showAuthMsg(authErrMsg(e.code), 'red');
+});
 
 // ══════════════════════════════════════════════════════════
 // ÉTAT GLOBAL — Interclub (équipes de 2 joueurs fixes)
@@ -105,7 +114,7 @@ async function getUserProfile(uid){
       const roles = Array.isArray(d.roles) && d.roles.length ? d.roles : [d.role || 'spectator'];
       return { roles, name: d.name||'', clubName: d.clubName||'', maxTeams: d.maxTeams||0 };
     }
-  } catch(e){}
+  } catch(e){ console.warn('getUserProfile error:', e); }
   return { roles:['spectator'], name:'', clubName:'', maxTeams:0 };
 }
 async function ensureUserDoc(user){
@@ -168,7 +177,7 @@ onAuthStateChanged(auth, async (user)=>{
     try {
       const snap = await getDoc(doc(db,'interclub','status'));
       if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
-    } catch(e){}
+    } catch(e){ console.warn('logout liveOpen resync error:', e); }
     showLogin();
   }
 });
@@ -189,7 +198,7 @@ window.loginEmail = async function(){
   catch(e){ showAuthMsg(authErrMsg(e.code),'red'); }
 };
 window.loginGoogle = async function(){
-  try { await signInWithPopup(auth, gProvider); }
+  try { await signInWithRedirect(auth, gProvider); }
   catch(e){ showAuthMsg(authErrMsg(e.code),'red'); }
 };
 window.logout = async function(){
@@ -271,7 +280,7 @@ function startLiveWatch(){
       try {
         const snap = await getDoc(doc(db,'interclub','status'));
         if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
-      } catch(e){}
+      } catch(e){ console.warn('liveWatch poll error:', e); }
     }, 4000);
   }
 }
@@ -368,7 +377,7 @@ async function saveResult(key, ga, gb){
 }
 async function auditLog(action, data){
   try { await addDoc(collection(db,'interclub_audit'),{ action, data, uid: CURRENT_USER?.uid, ts: serverTimestamp() }); }
-  catch(e){}
+  catch(e){ console.warn('auditLog error:', e); }
 }
 
 // ══════════════════════════════════════════════════════════
