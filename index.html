@@ -1801,19 +1801,35 @@ function stopTVCycle(){
   if(tvClockIv){ clearInterval(tvClockIv); tvClockIv=null; }
   stopTVAutoScroll();
 }
-// Programme la bascule vers l'écran suivant, avec une durée qui dépend du
-// type de l'écran actuellement affiché (kind 'standings' → intervalStandings,
-// sinon → intervalMatches). Ne programme rien s'il n'y a qu'un seul écran
-// disponible (rien à faire défiler).
+// Programme la bascule vers l'écran suivant.
+// Durée de base : celle configurée pour ce type d'écran (kind 'standings' →
+// intervalStandings, sinon → intervalMatches).
+// MAIS si l'écran a trop de contenu pour tenir en entier et doit défiler
+// (cf. startTVAutoScroll), cette durée de base ne suffit pas forcément à
+// tout lire : on calcule alors le temps réel que prend UN cycle complet de
+// défilement (pause en haut → défilement → pause en bas) et on attend au
+// moins ce temps-là avant de changer d'écran. La durée réglée par
+// l'opérateur reste un plancher (jamais plus court), pas un plafond.
+// Ne programme rien s'il n'y a qu'un seul écran disponible (rien à faire défiler).
 function scheduleTVAdvance(){
   if(tvCycleIv){ clearTimeout(tvCycleIv); tvCycleIv=null; }
   const screens = getActiveTVScreens();
   if(screens.length<=1) return;
   const current = screens[Math.min(tvScreenIndex, screens.length-1)];
   const cfg = getTVSettings();
-  const sec = (current && current.kind==='standings')
+  const baseSec = (current && current.kind==='standings')
     ? Math.max(5, +cfg.intervalStandings || 20)
     : Math.max(5, +cfg.intervalMatches || 12);
+  let sec = baseSec;
+  if(cfg.scroll !== false){
+    const el = document.getElementById('tvContent');
+    const maxScroll = el ? (el.scrollHeight - el.clientHeight) : 0;
+    if(maxScroll > 6){
+      const scrollDurationSec = maxScroll / TV_SCROLL_SPEED_PX_PER_SEC;
+      const fullReadSec = (2 * TV_SCROLL_PAUSE_MS/1000) + scrollDurationSec;
+      sec = Math.max(baseSec, fullReadSec);
+    }
+  }
   tvCycleIv = setTimeout(()=>{
     const screens2 = getActiveTVScreens();
     if(screens2.length>1) tvScreenIndex = (tvScreenIndex+1) % screens2.length;
@@ -1832,6 +1848,11 @@ function updateTVClock(){
 // → pause en bas (2,5s) → retour au tout début → on recommence (pour quand
 // même montrer tous les matchs). Ne fait rien si le contenu tient déjà
 // entièrement dans l'écran.
+// Ces deux constantes sont aussi utilisées par scheduleTVAdvance() pour
+// calculer combien de temps il faut laisser un écran affiché avant de
+// basculer sur le suivant, quand ce défilement est actif (cf. plus bas).
+const TV_SCROLL_SPEED_PX_PER_SEC = 23; // vitesse de défilement — lent, pensé pour être lisible
+const TV_SCROLL_PAUSE_MS = 2500;
 let tvScrollState = { phase:'pausedTop', since:0 };
 function startTVAutoScroll(){
   stopTVAutoScroll();
@@ -1853,8 +1874,8 @@ function startTVAutoScroll(){
   el.scrollTop = startPos;
   tvScrollState = { phase:'pausedTop', since: Date.now() };
   if(getTVSettings().scroll === false) return; // défilement désactivé par l'opérateur
-  const SPEED_PX_PER_SEC = 23; // vitesse de défilement — lent, pensé pour être lisible
-  const PAUSE_MS = 2500;
+  const SPEED_PX_PER_SEC = TV_SCROLL_SPEED_PX_PER_SEC;
+  const PAUSE_MS = TV_SCROLL_PAUSE_MS;
   let lastTs = null;
   // Safari iOS arrondit/tronque el.scrollTop à l'entier à CHAQUE écriture : si on
   // accumule en relisant el.scrollTop (qui vaut donc 0 ou 1 pixel près), les
