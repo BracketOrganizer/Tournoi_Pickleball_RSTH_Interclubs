@@ -1795,6 +1795,13 @@ function startTVCycle(){
   // celui de l'écran ACTUELLEMENT affiché (résultats/à venir = court,
   // classement = plus long), et chaque mise à jour live redonne un plein
   // temps de lecture.
+  // On déclenche ce premier rendu ICI (et pas seulement en espérant qu'un
+  // appelant fasse renderTVPage() après coup) : sinon, si l'appelant fait
+  // renderTVPage() AVANT startTVCycle() (comme au tout premier chargement
+  // de la page TV), le reset ci-dessus efface la programmation que ce
+  // premier rendu venait de poser, et l'écran reste bloqué en mode
+  // "Alterné" tant qu'aucune donnée live ne déclenche un nouveau rendu.
+  renderTVContent();
 }
 function stopTVCycle(){
   if(tvCycleIv){ clearTimeout(tvCycleIv); tvCycleIv=null; }
