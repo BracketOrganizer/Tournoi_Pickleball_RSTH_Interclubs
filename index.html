@@ -23,7 +23,7 @@
 <script type="module">
 import { initializeApp }            from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword,
-         createUserWithEmailAndPassword, signInWithRedirect, getRedirectResult, GoogleAuthProvider,
+         createUserWithEmailAndPassword, signInWithRedirect, signInWithPopup, getRedirectResult, GoogleAuthProvider,
          signOut, updateProfile }   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
 import { getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot, collection,
          addDoc, updateDoc, serverTimestamp, query, orderBy, getDocs, where }
@@ -62,6 +62,10 @@ let USER_ROLES   = [];
 let unsubTournament = null;
 let unsubResults    = null;
 let unsubLiveWatch  = null;
+let unsubUserList        = null; // liste des utilisateurs (admin) — temps réel
+let unsubClubList        = null; // liste des clubs + quotas (admin) — temps réel
+let unsubPendingRegs     = null; // inscriptions d'équipes en attente (admin) — temps réel
+let unsubClubTeams       = null; // équipes du club connecté — temps réel
 let liveWatchIv     = null; // polling de secours (mobile en veille)
 let pendingSpecTarget = null;
 let tvCycleIv = null;   // intervalle d'alternance Résultats/Classement en mode Écran
@@ -185,6 +189,10 @@ onAuthStateChanged(auth, async (user)=>{
 function unsubAll(){
   if(unsubTournament){ unsubTournament(); unsubTournament=null; }
   if(unsubResults)   { unsubResults();    unsubResults=null;    }
+  if(unsubUserList)   { unsubUserList();    unsubUserList=null;    }
+  if(unsubClubList)   { unsubClubList();    unsubClubList=null;    }
+  if(unsubPendingRegs){ unsubPendingRegs(); unsubPendingRegs=null; }
+  if(unsubClubTeams)  { unsubClubTeams();   unsubClubTeams=null;   }
   stopLiveWatch();
   startLiveWatch();
 }
@@ -198,8 +206,21 @@ window.loginEmail = async function(){
   catch(e){ showAuthMsg(authErrMsg(e.code),'red'); }
 };
 window.loginGoogle = async function(){
-  try { await signInWithRedirect(auth, gProvider); }
-  catch(e){ showAuthMsg(authErrMsg(e.code),'red'); }
+  // On tente d'abord signInWithPopup : la fenêtre Google s'ouvre en contexte
+  // de premier niveau, ce qui évite les soucis de "Tracking Prevention"
+  // (Edge/Firefox) qui bloquent le stockage tiers utilisé par l'iframe
+  // technique de signInWithRedirect. Si le popup est bloqué par le
+  // navigateur (mobile, bloqueur de popups...), on retombe sur le redirect.
+  try {
+    await signInWithPopup(auth, gProvider);
+  } catch(e){
+    if(e.code==='auth/popup-blocked' || e.code==='auth/operation-not-supported-in-this-environment' || e.code==='auth/cancelled-popup-request'){
+      try { await signInWithRedirect(auth, gProvider); }
+      catch(e2){ showAuthMsg(authErrMsg(e2.code),'red'); }
+    } else {
+      showAuthMsg(authErrMsg(e.code),'red');
+    }
+  }
 };
 window.logout = async function(){
   clearInterval(ST.timerIv); unsubAll();
@@ -407,7 +428,10 @@ function authErrMsg(code){
     'auth/weak-password':'Mot de passe trop faible (6 car. min).',
     'auth/popup-closed-by-user':'Connexion Google annulée.',
     'auth/too-many-requests':'Trop de tentatives.',
-    'auth/invalid-credential':'Email ou mot de passe incorrect.'
+    'auth/invalid-credential':'Email ou mot de passe incorrect.',
+    'auth/network-request-failed':'Connexion réseau impossible. Vérifiez votre connexion.',
+    'auth/web-storage-unsupported':'Votre navigateur bloque le stockage nécessaire à la connexion Google (mode privé ou protection anti-pistage stricte). Essayez de désactiver la protection anti-pistage pour ce site, ou utilisez un autre navigateur.',
+    'auth/internal-error':'Erreur interne de connexion. Réessayez, ou vérifiez que le stockage/cookies ne sont pas bloqués pour ce site.'
   };
   return map[code]||'Erreur : '+code;
 }
@@ -415,6 +439,19 @@ function authErrMsg(code){
 // ══════════════════════════════════════════════════════════
 // ESPACE CLUB — inscription d'équipes par un responsable de club
 // ══════════════════════════════════════════════════════════
+// Normalise un nom pour comparaison (accents, casse, espaces superflus).
+function normalizeName(s){
+  return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase().replace(/\s+/g,' ');
+}
+// Identifiant de verrou anti-doublon pour une équipe : basé sur le club +
+// la paire de joueurs (peu importe l'ordre p1/p2), pas sur le nom d'équipe
+// (2 équipes peuvent avoir le même nom, mais 2 fois "les mêmes 2 joueurs
+// dans le même club" est presque toujours une double saisie accidentelle).
+function teamLockId(clubUid, p1, p2){
+  const pair = [normalizeName(p1), normalizeName(p2)].sort().join('__');
+  const slug = pair.replace(/[^a-z0-9_]+/g,'_').replace(/^_+|_+$/g,'').slice(0,140) || 'equipe';
+  return clubUid + '__' + slug;
+}
 let CLUB_PROFILE = null;   // { clubName, maxTeams }
 let CLUB_TEAMS   = [];     // registrations Firestore du club connecté
 let CLUB_EDIT_ID = null;   // id de l'inscription en cours d'édition (ou null)
@@ -446,17 +483,17 @@ window.returnToAppFromClub = function(){
   if(cs) cs.style.display='none';
   document.getElementById('appScreen').style.display='block';
 };
-async function loadClubTeams(){
+function loadClubTeams(){
   const listEl = document.getElementById('clubTeamsList');
+  if(unsubClubTeams){ renderClubScreen(); return; } // déjà abonné
   if(listEl) listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0">Chargement…</div>';
-  try {
-    const q = query(collection(db,'interclub_registrations'), where('clubUid','==',CURRENT_USER.uid));
-    const snap = await getDocs(q);
+  const q = query(collection(db,'interclub_registrations'), where('clubUid','==',CURRENT_USER.uid));
+  unsubClubTeams = onSnapshot(q, (snap)=>{
     CLUB_TEAMS = [];
     snap.forEach(d=> CLUB_TEAMS.push({ id:d.id, ...d.data() }));
     CLUB_TEAMS.sort((a,b)=> (a.createdAtMs||0) - (b.createdAtMs||0));
-  } catch(e){ CLUB_TEAMS = []; }
-  renderClubScreen();
+    renderClubScreen();
+  }, (e)=>{ CLUB_TEAMS = []; renderClubScreen(); });
 }
 function renderClubScreen(){
   const quotaEl = document.getElementById('clubQuota');
@@ -518,11 +555,24 @@ window.clubAddTeam = async function(){
   const lv   = +document.getElementById('club_t_lv').value || 3;
   const msg  = document.getElementById('clubAddMsg');
   if(!name||!p1||!p2){ if(msg){ msg.textContent='Nom, Joueur 1 et Joueur 2 sont obligatoires.'; msg.style.color='var(--red)'; } return; }
+  const submitBtn = document.getElementById('clubAddBtn');
+  if(submitBtn){ if(submitBtn.disabled) return; submitBtn.disabled = true; }
   try {
+    // Anti-doublon FIABLE (résiste aux double-clics) : on réserve d'abord un
+    // verrou basé sur la paire de joueurs pour ce club. Si le verrou existe
+    // déjà, Firestore refuse l'écriture (règles : "create" autorisé mais
+    // pas "update" sur interclub_team_locks) → doublon détecté à coup sûr.
+    const lockId = teamLockId(CURRENT_USER.uid, p1, p2);
+    try {
+      await setDoc(doc(db,'interclub_team_locks',lockId), { clubUid: CURRENT_USER.uid, p1, p2, createdAtMs: Date.now() });
+    } catch(lockErr){
+      if(msg){ msg.textContent='❌ Cette paire de joueurs est déjà inscrite pour votre club (en attente ou déjà validée).'; msg.style.color='var(--red)'; }
+      return;
+    }
     await addDoc(collection(db,'interclub_registrations'),{
       clubUid: CURRENT_USER.uid,
       clubName: CLUB_PROFILE.clubName,
-      teamName: name, p1, p2, lv,
+      teamName: name, p1, p2, lv, teamLockId: lockId,
       status: 'pending',
       createdAtMs: Date.now(),
       createdAt: serverTimestamp()
@@ -530,8 +580,8 @@ window.clubAddTeam = async function(){
     ['club_t_name','club_t_p1','club_t_p2'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
     const lvEl=document.getElementById('club_t_lv'); if(lvEl) lvEl.value='3';
     if(msg){ msg.textContent='✅ Équipe inscrite, en attente de validation par l\'organisateur.'; msg.style.color='var(--grn)'; setTimeout(()=>{ msg.textContent=''; },4000); }
-    await loadClubTeams();
   } catch(e){ if(msg){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; } }
+  finally { if(submitBtn) submitBtn.disabled = false; }
 };
 window.clubSaveTeamEdit = async function(id){
   const name = document.getElementById(`clubEdit_name_${id}`).value.trim();
@@ -540,14 +590,29 @@ window.clubSaveTeamEdit = async function(id){
   const lv   = +document.getElementById(`clubEdit_lv_${id}`).value || 3;
   if(!name||!p1||!p2){ alert('Nom, Joueur 1 et Joueur 2 sont obligatoires.'); return; }
   try {
-    await updateDoc(doc(db,'interclub_registrations',id),{ teamName:name, p1, p2, lv });
+    const existing = CLUB_TEAMS.find(t=>t.id===id);
+    const newLockId = teamLockId(CURRENT_USER.uid, p1, p2);
+    const update = { teamName:name, p1, p2, lv };
+    if(!existing || existing.teamLockId !== newLockId){
+      // La paire de joueurs a changé : on réserve le nouveau verrou (peut
+      // échouer si cette paire est déjà inscrite ailleurs pour ce club),
+      // puis on libère l'ancien.
+      try { await setDoc(doc(db,'interclub_team_locks',newLockId), { clubUid: CURRENT_USER.uid, p1, p2, createdAtMs: Date.now() }); }
+      catch(lockErr){ alert('Cette paire de joueurs est déjà inscrite pour votre club.'); return; }
+      if(existing && existing.teamLockId){ try { await deleteDoc(doc(db,'interclub_team_locks',existing.teamLockId)); } catch(e){} }
+      update.teamLockId = newLockId;
+    }
+    await updateDoc(doc(db,'interclub_registrations',id), update);
     CLUB_EDIT_ID = null;
-    await loadClubTeams();
   } catch(e){ alert('Erreur : '+e.message); }
 };
 window.clubDeleteTeam = async function(id){
   if(!confirm('Supprimer cette équipe de votre inscription ?')) return;
-  try { await deleteDoc(doc(db,'interclub_registrations',id)); await loadClubTeams(); }
+  try {
+    const t = CLUB_TEAMS.find(x=>x.id===id);
+    await deleteDoc(doc(db,'interclub_registrations',id));
+    if(t && t.teamLockId){ try { await deleteDoc(doc(db,'interclub_team_locks',t.teamLockId)); } catch(e){} }
+  }
   catch(e){ alert('Erreur : '+e.message); }
 };
 window.clubLogout = async function(){
@@ -2188,7 +2253,15 @@ function updateLiveToggleBtn(){
 // ══════════════════════════════════════════════════════════
 window.toggleAdminPanel = function(){
   const el=document.getElementById('adminPanel');
-  el.style.display=el.style.display==='none'?'block':'none';
+  const opening = el.style.display==='none';
+  el.style.display = opening ? 'block' : 'none';
+  if(opening && isAdmin()){
+    // Tout se charge automatiquement dès l'ouverture du panneau —
+    // plus besoin de cliquer sur "Charger" / "Rafraîchir".
+    window.loadUserList();
+    window.loadClubList();
+    window.loadPendingRegistrations();
+  }
 };
 window.toggleNewUClubFields = function(){
   const checked = Array.from(document.querySelectorAll('.newU_roleChk:checked')).map(c=>c.value);
@@ -2267,31 +2340,60 @@ window.setUserRole = async function(){
     setTimeout(()=>{ msg.textContent=''; },3000);
   } catch(e){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; }
 };
-window.loadUserList = async function(){
+window.loadUserList = function(){
   if(!isAdmin()) return;
   const listEl=document.getElementById('userListBody'); if(!listEl) return;
-  listEl.innerHTML='<tr><td colspan="4" style="color:var(--muted);padding:10px 0">Chargement…</td></tr>';
-  try {
-    const {getDocs,collection:col2}=await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
-    const snap=await getDocs(col2(db,'users'));
-    if(snap.empty){ listEl.innerHTML='<tr><td colspan="4" style="color:var(--muted);padding:10px 0">Aucun utilisateur.</td></tr>'; return; }
+  if(unsubUserList) return; // déjà abonné, rien à refaire
+  listEl.innerHTML='<tr><td colspan="5" style="color:var(--muted);padding:10px 0">Chargement…</td></tr>';
+  unsubUserList = onSnapshot(collection(db,'users'), (snap)=>{
+    if(snap.empty){ listEl.innerHTML='<tr><td colspan="5" style="color:var(--muted);padding:10px 0">Aucun utilisateur.</td></tr>'; return; }
     listEl.innerHTML='';
     snap.forEach(d=>{
       const u=d.data(); const uid=d.id;
       const roleIconMap={admin:'👑',scorer:'✏️',spectator:'👁',club:'🏟️'};
       const roles = Array.isArray(u.roles) && u.roles.length ? u.roles : [u.role||'spectator'];
       const rolesDisplay = roles.map(r=>`${roleIconMap[r]||'?'} ${r}`).join(' · ');
+      const uidShort = uid.slice(0,6)+'…'+uid.slice(-4);
       const tr=document.createElement('tr');
       tr.style.cssText='border-bottom:1px solid var(--bdr);font-size:13px';
-      tr.innerHTML=`<td style="padding:8px 6px;font-weight:600">${u.name||'—'}</td>
-        <td style="padding:8px 6px;color:var(--muted);font-size:12px">${u.email||'—'}</td>
-        <td style="padding:8px 6px">${rolesDisplay}</td>
-        <td style="padding:8px 6px;text-align:center">
-          <button onclick="deleteUserFromList('${uid}')" style="background:none;border:1px solid var(--red);color:var(--red);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px">Suppr.</button>
+      tr.innerHTML=`<td data-label="Nom" style="padding:8px 6px;font-weight:600">${u.name||'—'}</td>
+        <td data-label="Email" style="padding:8px 6px;color:var(--muted);font-size:12px">${u.email||'—'}</td>
+        <td data-label="UID" style="padding:8px 6px">
+          <span style="font-family:monospace;font-size:11px;color:var(--muted)" title="${uid}">${uidShort}</span>
+          <button onclick="copyUID('${uid}',this)" title="Copier l'UID complet"
+            style="background:none;border:1px solid var(--bdr2);color:var(--muted);border-radius:5px;padding:2px 6px;font-size:11px;cursor:pointer;margin-left:4px">📋</button>
+        </td>
+        <td data-label="Rôle" style="padding:8px 6px">${rolesDisplay}</td>
+        <td data-label="Action" style="padding:8px 6px">
+          <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+            <button onclick="adminEditUserRole('${uid}')" style="background:var(--s2);border:1px solid var(--bdr2);color:var(--fg);padding:4px 10px;border-radius:5px;cursor:pointer;font-size:12px;font-weight:600">✏️ Rôle</button>
+            <button onclick="deleteUserFromList('${uid}')" style="background:none;border:1px solid var(--red);color:var(--red);padding:4px 10px;border-radius:5px;cursor:pointer;font-size:12px">🗑 Suppr.</button>
+          </div>
         </td>`;
       listEl.appendChild(tr);
     });
-  } catch(e){ listEl.innerHTML=`<tr><td colspan="4" style="color:var(--red);padding:10px 0">Erreur : ${e.message}</td></tr>`; }
+  }, (e)=>{ listEl.innerHTML=`<tr><td colspan="5" style="color:var(--red);padding:10px 0">Erreur : ${e.message}</td></tr>`; });
+};
+// ── Copier l'UID dans le presse-papier ────────────────────
+window.copyUID = function(uid, btn){
+  const done = ()=>{ if(!btn) return; const old=btn.textContent; btn.textContent='✅'; setTimeout(()=>{ btn.textContent=old; },1200); };
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(uid).then(done).catch(()=>{ prompt('UID (copiez manuellement) :', uid); });
+  } else { prompt('UID (copiez manuellement) :', uid); }
+};
+// ── Pré-remplit le formulaire "Modifier rôle" depuis la liste,
+//    sans avoir à copier/coller l'UID à la main ──────────────
+window.adminEditUserRole = async function(uid){
+  const input = document.getElementById('adminUidInput');
+  if(input) input.value = uid;
+  await window.loadUserRolesIntoForm();
+  const box = document.getElementById('adminUidInput');
+  if(box){
+    box.scrollIntoView({ behavior:'smooth', block:'center' });
+    box.style.transition='background-color .3s';
+    box.style.backgroundColor = '#fff7cc';
+    setTimeout(()=>{ box.style.backgroundColor=''; }, 900);
+  }
 };
 window.deleteUserFromList = async function(uid){
   if(!isAdmin()||!confirm('Supprimer cet utilisateur de Firestore ?')) return;
@@ -2325,35 +2427,42 @@ window.adminCreateClub = async function(){
     loadClubList();
   } catch(e){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; }
 };
-window.loadClubList = async function(){
+window.loadClubList = function(){
   if(!isAdmin()) return;
   const listEl=document.getElementById('clubListBody'); if(!listEl) return;
+  if(unsubClubList) return; // déjà abonné, rien à refaire
   listEl.innerHTML='<tr><td colspan="5" style="color:var(--muted);padding:10px 0">Chargement…</td></tr>';
-  try {
-    const snap = await getDocs(collection(db,'users'));
-    const clubs = []; snap.forEach(d=>{ const u=d.data(); if(u.role==='club') clubs.push({uid:d.id,...u}); });
-    if(clubs.length===0){ listEl.innerHTML='<tr><td colspan="5" style="color:var(--muted);padding:10px 0">Aucun club créé.</td></tr>'; return; }
-    const regSnap = await getDocs(collection(db,'interclub_registrations'));
-    const counts = {};
-    regSnap.forEach(d=>{ const r=d.data(); counts[r.clubUid]=(counts[r.clubUid]||0)+1; });
+  let latestClubs = [], latestCounts = {};
+  const render = ()=>{
+    if(latestClubs.length===0){ listEl.innerHTML='<tr><td colspan="5" style="color:var(--muted);padding:10px 0">Aucun club créé.</td></tr>'; return; }
     listEl.innerHTML='';
-    clubs.forEach(c=>{
-      const used = counts[c.uid]||0;
+    latestClubs.forEach(c=>{
+      const used = latestCounts[c.uid]||0;
       const tr=document.createElement('tr');
       tr.style.cssText='border-bottom:1px solid var(--bdr);font-size:13px';
-      tr.innerHTML=`<td style="padding:8px 6px;font-weight:600">${c.clubName||c.name||'—'}</td>
-        <td style="padding:8px 6px;color:var(--muted);font-size:12px">${c.email||'—'}</td>
-        <td style="padding:8px 6px">${used} / ${c.maxTeams||0}</td>
-        <td style="padding:8px 6px">
+      tr.innerHTML=`<td data-label="Club" style="padding:8px 6px;font-weight:600">${c.clubName||c.name||'—'}</td>
+        <td data-label="Email" style="padding:8px 6px;color:var(--muted);font-size:12px">${c.email||'—'}</td>
+        <td data-label="Équipes" style="padding:8px 6px">${used} / ${c.maxTeams||0}</td>
+        <td data-label="Quota" style="padding:8px 6px">
           <input type="number" min="0" id="clubMax_${c.uid}" value="${c.maxTeams||0}" style="width:60px;padding:3px 6px">
           <button onclick="updateClubQuota('${c.uid}')" style="background:none;border:1px solid var(--bdr2);color:var(--fg);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px">✓</button>
         </td>
-        <td style="padding:8px 6px;text-align:center">
+        <td data-label="Action" style="padding:8px 6px;text-align:center">
           <button onclick="deleteClub('${c.uid}')" style="background:none;border:1px solid var(--red);color:var(--red);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px">Suppr.</button>
         </td>`;
       listEl.appendChild(tr);
     });
-  } catch(e){ listEl.innerHTML=`<tr><td colspan="5" style="color:var(--red);padding:10px 0">Erreur : ${e.message}</td></tr>`; }
+  };
+  unsubClubList = onSnapshot(collection(db,'users'), (snap)=>{
+    latestClubs = [];
+    snap.forEach(d=>{ const u=d.data(); if(u.role==='club') latestClubs.push({uid:d.id,...u}); });
+    render();
+  }, (e)=>{ listEl.innerHTML=`<tr><td colspan="5" style="color:var(--red);padding:10px 0">Erreur : ${e.message}</td></tr>`; });
+  onSnapshot(collection(db,'interclub_registrations'), (snap)=>{
+    latestCounts = {};
+    snap.forEach(d=>{ const r=d.data(); latestCounts[r.clubUid]=(latestCounts[r.clubUid]||0)+1; });
+    render();
+  });
 };
 window.updateClubQuota = async function(uid){
   const val = +document.getElementById(`clubMax_${uid}`).value || 0;
@@ -2365,31 +2474,50 @@ window.deleteClub = async function(uid){
   try { await deleteDoc(doc(db,'users',uid)); loadClubList(); }
   catch(e){ alert('Erreur : '+e.message); }
 };
-window.loadPendingRegistrations = async function(){
+let REG_PENDING_IC = [];
+window.loadPendingRegistrations = function(){
   if(!isAdmin()) return;
   const listEl=document.getElementById('pendingRegList'); if(!listEl) return;
+  if(unsubPendingRegs) { renderPendingRegistrationsIC(); return; } // déjà abonné
   listEl.innerHTML='<div style="color:var(--muted);padding:10px 0">Chargement…</div>';
-  try {
-    const q = query(collection(db,'interclub_registrations'), where('status','==','pending'));
-    const snap = await getDocs(q);
-    const regs = []; snap.forEach(d=> regs.push({id:d.id,...d.data()}));
-    if(regs.length===0){ listEl.innerHTML='<div style="color:var(--muted);padding:10px 0;font-size:13px">Aucune inscription en attente.</div>'; return; }
-    regs.sort((a,b)=> (a.createdAtMs||0)-(b.createdAtMs||0));
-    listEl.innerHTML = regs.map(r=>`
-      <div style="border:1px solid var(--bdr);border-radius:10px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-        <div>
-          <div style="font-weight:700">${r.teamName||'—'} <span style="color:var(--muted);font-weight:400;font-size:12px">— ${r.clubName||'—'}</span></div>
-          <div style="color:var(--muted);font-size:13px">${r.p1||'—'} &amp; ${r.p2||'—'} · Niveau ${r.lv||3}</div>
-        </div>
-        <div style="display:flex;gap:8px">
-          <button class="btn btn-g btn-sm" onclick="approveRegistration('${r.id}')">✓ Valider</button>
-          <button class="btn btn-ghost btn-sm" style="border-color:var(--red);color:var(--red)" onclick="rejectRegistration('${r.id}')">✕ Refuser</button>
-        </div>
-      </div>`).join('');
-  } catch(e){ listEl.innerHTML=`<div style="color:var(--red);padding:10px 0">Erreur : ${e.message}</div>`; }
+  const q = query(collection(db,'interclub_registrations'), where('status','==','pending'));
+  unsubPendingRegs = onSnapshot(q, (snap)=>{
+    REG_PENDING_IC = [];
+    snap.forEach(d=> REG_PENDING_IC.push({id:d.id,...d.data()}));
+    REG_PENDING_IC.sort((a,b)=> (a.createdAtMs||0)-(b.createdAtMs||0));
+    renderPendingRegistrationsIC();
+  }, (e)=>{ listEl.innerHTML=`<div style="color:var(--red);padding:10px 0">Erreur : ${e.message}</div>`; });
 };
+function renderPendingRegistrationsIC(){
+  const listEl=document.getElementById('pendingRegList'); if(!listEl) return;
+  const max = (ST.cfg && ST.cfg.n) ? ST.cfg.n : 0;
+  const current = ST.teams.length;
+  const free = Math.max(0, max - current);
+  const capEl = document.getElementById('pendingRegCap');
+  if(capEl){
+    capEl.textContent = `${current} / ${max} équipes déjà dans le tournoi — ${free} place${free>1?'s':''} restante${free>1?'s':''} · 🔄 mise à jour automatique`;
+    capEl.style.color = free<=0 ? 'var(--red)' : (free<=REG_PENDING_IC.length ? '#e6a23c' : 'var(--muted)');
+  }
+  if(REG_PENDING_IC.length===0){ listEl.innerHTML='<div style="color:var(--muted);padding:10px 0;font-size:13px">Aucune inscription en attente.</div>'; return; }
+  listEl.innerHTML = REG_PENDING_IC.map(r=>`
+    <div style="border:1px solid var(--bdr);border-radius:10px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+      <div>
+        <div style="font-weight:700">${r.teamName||'—'} <span style="color:var(--muted);font-weight:400;font-size:12px">— ${r.clubName||'—'}</span></div>
+        <div style="color:var(--muted);font-size:13px">${r.p1||'—'} &amp; ${r.p2||'—'} · Niveau ${r.lv||3}</div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-g btn-sm" onclick="approveRegistration('${r.id}')" ${free<=0?'disabled title="Quota d\'équipes atteint (voir Config)"':''}>✓ Valider</button>
+        <button class="btn btn-ghost btn-sm" style="border-color:var(--red);color:var(--red)" onclick="rejectRegistration('${r.id}')">✕ Refuser</button>
+      </div>
+    </div>`).join('');
+}
 window.approveRegistration = async function(id){
   if(!isAdmin()) return;
+  const max = (ST.cfg && ST.cfg.n) ? ST.cfg.n : 0;
+  if(ST.teams.length >= max){
+    alert(`Impossible : le tournoi est configuré pour ${max} équipes et cette quantité est déjà atteinte.\nAugmentez le nombre d'équipes dans Config si besoin, ou refusez/supprimez une équipe existante.`);
+    return;
+  }
   try {
     const snap = await getDoc(doc(db,'interclub_registrations',id));
     if(!snap.exists()) return;
@@ -2399,12 +2527,16 @@ window.approveRegistration = async function(id){
     await saveTournament({ teams: ST.teams });
     await updateDoc(doc(db,'interclub_registrations',id), { status:'imported', teamId });
     renderTeams();
-    loadPendingRegistrations();
+    // Pas besoin de recharger manuellement : l'écoute temps réel s'en charge.
   } catch(e){ alert('Erreur : '+e.message); }
 };
 window.rejectRegistration = async function(id){
   if(!isAdmin()||!confirm('Refuser et supprimer cette inscription ?')) return;
-  try { await deleteDoc(doc(db,'interclub_registrations',id)); loadPendingRegistrations(); }
+  try {
+    const reg = REG_PENDING_IC.find(r=>r.id===id);
+    await deleteDoc(doc(db,'interclub_registrations',id));
+    if(reg && reg.teamLockId){ try { await deleteDoc(doc(db,'interclub_team_locks',reg.teamLockId)); } catch(e){} }
+  }
   catch(e){ alert('Erreur : '+e.message); }
 };
 
@@ -3133,6 +3265,20 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
   .mc{ grid-template-columns:1fr 52px 24px 52px 1fr;gap:5px;padding:10px 10px; }
   .mt-nm{ font-size:14px; }
 }
+/* ── PANNEAU ADMIN — MOBILE ── */
+@media (max-width: 767px) {
+  /* Tableaux utilisateurs / clubs → cartes empilées (plus de scroll horizontal) */
+  .user-tbl thead { display: none; }
+  .user-tbl, .user-tbl tbody, .user-tbl tr, .user-tbl td { display: block; width: 100%; }
+  .user-tbl tr { border: 1px solid var(--bdr); border-radius: 10px; margin-bottom: 10px; padding: 8px 12px; background: var(--s1); }
+  .user-tbl td { border: none !important; padding: 5px 0 !important; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .user-tbl td::before { content: attr(data-label); font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); font-weight: 700; flex-shrink: 0; }
+  .user-tbl td[data-label="Action"] > div { justify-content: flex-end; width: 100%; }
+  #adminPanel input[type=checkbox] { width: 18px; height: 18px; }
+}
+@media (max-width: 480px) {
+  .user-tbl td[data-label="UID"] span { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+}
 :focus-visible{ outline:2px solid var(--grn);outline-offset:2px;border-radius:4px; }
 .ovx{ overflow-x:auto;-webkit-overflow-scrolling:touch; }
 @keyframes blink{ 0%,100%{opacity:1}50%{opacity:.4} }
@@ -3392,7 +3538,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
           <div class="admin-panel-ttl" style="margin-bottom:0">👥 Utilisateurs</div>
           <button onclick="loadUserList()" style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px">🔄 Rafraîchir</button>
         </div>
-        <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;min-width:480px"><thead><tr style="border-bottom:2px solid var(--bdr2)"><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Nom</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Email</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Rôle</th><th style="padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Action</th></tr></thead><tbody id="userListBody"><tr><td colspan="4" style="color:var(--muted);font-size:13px;padding:10px 0">Cliquez sur Rafraîchir.</td></tr></tbody></table></div>
+        <div style="overflow-x:auto"><table class="user-tbl" style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid var(--bdr2)"><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Nom</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Email</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">UID</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Rôle</th><th style="padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Action</th></tr></thead><tbody id="userListBody"><tr><td colspan="5" style="color:var(--muted);font-size:13px;padding:10px 0">Chargement…</td></tr></tbody></table></div>
       </div>
 
       <!-- 🏟️ GESTION DES CLUBS -->
@@ -3417,13 +3563,14 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
           <div class="admin-panel-ttl" style="margin-bottom:0">Clubs enregistrés</div>
           <button onclick="loadClubList()" style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px">🔄 Rafraîchir</button>
         </div>
-        <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;min-width:520px"><thead><tr style="border-bottom:2px solid var(--bdr2)"><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Club</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Email</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Équipes</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Quota</th><th style="padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Action</th></tr></thead><tbody id="clubListBody"><tr><td colspan="5" style="color:var(--muted);font-size:13px;padding:10px 0">Cliquez sur Rafraîchir.</td></tr></tbody></table></div>
+        <div style="overflow-x:auto"><table class="user-tbl" style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid var(--bdr2)"><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Club</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Email</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Équipes</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Quota</th><th style="padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Action</th></tr></thead><tbody id="clubListBody"><tr><td colspan="5" style="color:var(--muted);font-size:13px;padding:10px 0">Chargement…</td></tr></tbody></table></div>
 
         <div style="display:flex;align-items:center;gap:12px;margin:20px 0 12px">
           <div class="admin-panel-ttl" style="margin-bottom:0">⏳ Inscriptions en attente de validation</div>
           <button onclick="loadPendingRegistrations()" style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px">🔄 Rafraîchir</button>
         </div>
-        <div id="pendingRegList" style="color:var(--muted);font-size:13px">Cliquez sur Rafraîchir.</div>
+        <div id="pendingRegCap" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div>
+        <div id="pendingRegList" style="color:var(--muted);font-size:13px">Chargement…</div>
       </div>
 
       <!-- Live control + outils admin -->
@@ -4062,7 +4209,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
       <div><label>Niveau</label>
         <select id="club_t_lv"><option value="1">⭐</option><option value="2">⭐⭐</option><option value="3" selected>⭐⭐⭐</option><option value="4">⭐⭐⭐⭐</option><option value="5">⭐⭐⭐⭐⭐</option></select>
       </div>
-      <button class="btn btn-g btn-sm" onclick="clubAddTeam()">✓ Inscrire cette équipe</button>
+      <button id="clubAddBtn" class="btn btn-g btn-sm" onclick="clubAddTeam()">✓ Inscrire cette équipe</button>
       <div id="clubAddMsg" style="font-size:13px;min-height:18px"></div>
     </div>
   </div>
