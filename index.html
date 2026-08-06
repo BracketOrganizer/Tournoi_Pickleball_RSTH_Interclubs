@@ -2643,19 +2643,47 @@ function renderPendingRegistrationsIC(){
     capEl.textContent = `${current} / ${max} équipes déjà dans le tournoi — ${free} place${free>1?'s':''} restante${free>1?'s':''} · 🔄 mise à jour automatique`;
     capEl.style.color = free<=0 ? 'var(--red)' : (free<=REG_PENDING_IC.length ? '#e6a23c' : 'var(--muted)');
   }
+  const bulkBtn = document.getElementById('regValidateAllBtn');
+  if(bulkBtn) bulkBtn.style.display = REG_PENDING_IC.length ? '' : 'none';
   if(REG_PENDING_IC.length===0){ listEl.innerHTML='<div style="color:var(--muted);padding:10px 0;font-size:13px">Aucune inscription en attente.</div>'; return; }
-  listEl.innerHTML = REG_PENDING_IC.map(r=>`
+  listEl.innerHTML = REG_PENDING_IC.map((r,i)=>{
+    const willFit = i < free;
+    const rank = `<span style="font-size:11px;font-weight:700;color:${willFit?'#5ad080':'#e6a23c'};background:rgba(255,255,255,.06);border-radius:8px;padding:1px 7px;margin-right:6px">#${i+1}${willFit?'':' · attente'}</span>`;
+    return `
     <div style="border:1px solid var(--bdr);border-radius:10px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
       <div>
-        <div style="font-weight:700">${r.teamName||'—'} <span style="color:var(--muted);font-weight:400;font-size:12px">— ${r.clubName||'—'}</span></div>
+        <div style="font-weight:700">${rank}${r.teamName||'—'} <span style="color:var(--muted);font-weight:400;font-size:12px">— ${r.clubName||'—'}</span></div>
         <div style="color:var(--muted);font-size:13px">${r.p1||'—'} &amp; ${r.p2||'—'} · Niveau ${r.lv||3}</div>
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-g btn-sm" onclick="approveRegistration('${r.id}')" ${free<=0?'disabled title="Quota d\'équipes atteint (voir Config)"':''}>✓ Valider</button>
         <button class="btn btn-ghost btn-sm" style="border-color:var(--red);color:var(--red)" onclick="rejectRegistration('${r.id}')">✕ Refuser</button>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
+window.approveAllPending = async function(){
+  if(!isAdmin()) return;
+  const max = (ST.cfg && ST.cfg.n) ? ST.cfg.n : 0;
+  let free = Math.max(0, max - ST.teams.length);
+  if(free<=0){ alert('Aucune place disponible : le quota du tournoi est déjà atteint.'); return; }
+  const queue = [...REG_PENDING_IC]; // déjà trié par ordre d'arrivée
+  const toApprove = queue.slice(0, free);
+  if(toApprove.length===0) return;
+  if(!confirm(`Valider les ${toApprove.length} plus anciennes équipes en attente (dans la limite des ${free} place${free>1?'s':''} restante${free>1?'s':''}) ?`)) return;
+  let ok=0, fail=0;
+  for(const r of toApprove){
+    try {
+      const teamId = 't_' + Date.now() + '_' + Math.random().toString(36).slice(2,6);
+      ST.teams.push({ id: teamId, name: r.teamName, club: r.clubName||'—', p1: r.p1, p2: r.p2, lv: r.lv||3 });
+      await saveTournament({ teams: ST.teams });
+      await updateDoc(doc(db,'interclub_registrations',r.id), { status:'imported', teamId });
+      ok++;
+    } catch(e){ fail++; console.warn('approveAllPending', r.id, e); }
+  }
+  renderTeams();
+  alert(`${ok} équipe${ok>1?'s':''} validée${ok>1?'s':''}.` + (fail?` ${fail} échec${fail>1?'s':''} (voir console).`:'') + (queue.length>toApprove.length ? `\n${queue.length-toApprove.length} équipe(s) restent en liste d'attente, quota atteint.` : ''));
+};
 window.approveRegistration = async function(id){
   if(!isAdmin()) return;
   const max = (ST.cfg && ST.cfg.n) ? ST.cfg.n : 0;
@@ -3720,9 +3748,10 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
         </div>
         <div style="overflow-x:auto"><table class="user-tbl" style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid var(--bdr2)"><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Club</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Email</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Équipes</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Quota</th><th style="padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Action</th></tr></thead><tbody id="clubListBody"><tr><td colspan="5" style="color:var(--muted);font-size:13px;padding:10px 0">Chargement…</td></tr></tbody></table></div>
 
-        <div style="display:flex;align-items:center;gap:12px;margin:20px 0 12px">
+        <div style="display:flex;align-items:center;gap:12px;margin:20px 0 12px;flex-wrap:wrap">
           <div class="admin-panel-ttl" style="margin-bottom:0">⏳ Inscriptions en attente de validation</div>
           <button onclick="loadPendingRegistrations()" style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px">🔄 Rafraîchir</button>
+          <button id="regValidateAllBtn" class="btn btn-g btn-sm" style="display:none" onclick="approveAllPending()">✓✓ Tout valider (dans la limite des places)</button>
         </div>
         <div id="pendingRegCap" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div>
         <div id="pendingRegList" style="color:var(--muted);font-size:13px">Chargement…</div>
