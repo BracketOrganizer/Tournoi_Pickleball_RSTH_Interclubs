@@ -3556,33 +3556,34 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
     <div id="authMsg" style="text-align:center;font-size:13px;min-height:18px;margin-bottom:16px;color:var(--red)"></div>
 
     <!-- ══ ZONE SPECTATEURS ══ -->
-    <div style="background:linear-gradient(135deg,#0d2a4a,#103c6a);border-radius:14px;padding:18px 16px;margin-bottom:18px;border:2px solid rgba(100,180,255,.3)">
-      <div style="font-family:'Oswald',sans-serif;font-size:22px;font-weight:700;letter-spacing:1.5px;color:#7adcff;text-align:center;margin-bottom:4px;text-transform:uppercase">👁 Accès Spectateur</div>
-      <div style="font-size:12px;color:rgba(180,210,255,.7);text-align:center;margin-bottom:14px">Suivez le tournoi en temps réel — sans inscription</div>
+    <div style="background:linear-gradient(135deg,#eaf2fd,#dbe8fa);border-radius:14px;padding:18px 16px;margin-bottom:18px;border:2px solid rgba(100,150,220,.35)">
+      <div style="font-family:'Oswald',sans-serif;font-size:22px;font-weight:700;letter-spacing:1.5px;color:#1a4a7a;text-align:center;margin-bottom:4px;text-transform:uppercase">👁 Accès Spectateur</div>
+      <div style="font-size:12px;color:#3a5a80;text-align:center;margin-bottom:14px">Suivez le tournoi en temps réel — sans inscription</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
-        <button onclick="enterLiveModeAndGo(4)" style="padding:16px 8px;background:linear-gradient(135deg,#1a4a7a,#1560c0);border:2px solid #4090e0;border-radius:10px;color:#fff;font-family:'Oswald',sans-serif;font-size:18px;letter-spacing:.8px;cursor:pointer;text-transform:uppercase;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:7px;font-weight:700">
+        <button onclick="enterLiveModeAndGo(4)" style="padding:16px 8px;background:linear-gradient(135deg,#5b9bd8,#3f7fc4);border:2px solid #7ab0e8;border-radius:10px;color:#fff;font-family:'Oswald',sans-serif;font-size:18px;letter-spacing:.8px;cursor:pointer;text-transform:uppercase;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:7px;font-weight:700">
           <span class="spec-nav-live-dot"></span> LIVE
         </button>
-        <button onclick="enterLiveModeAndGo(5)" style="padding:16px 8px;background:linear-gradient(135deg,#4a3200,#8a6010);border:2px solid #d4a030;border-radius:10px;color:#ffd080;font-family:'Oswald',sans-serif;font-size:18px;letter-spacing:.8px;cursor:pointer;text-transform:uppercase;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:7px;font-weight:700">
+        <button onclick="enterLiveModeAndGo(5)" style="padding:16px 8px;background:linear-gradient(135deg,#e0a840,#c88f28);border:2px solid #e8c070;border-radius:10px;color:#fff;font-family:'Oswald',sans-serif;font-size:18px;letter-spacing:.8px;cursor:pointer;text-transform:uppercase;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:7px;font-weight:700">
           🏆 CLASSEMENT
         </button>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">
-        <button onclick="enterLiveModeAndGo('T')" style="padding:13px 6px;background:rgba(255,255,255,.08);border:1.5px solid rgba(255,255,255,.2);border-radius:10px;color:#c0d8f8;font-family:'Oswald',sans-serif;font-size:14px;letter-spacing:.4px;cursor:pointer;text-transform:uppercase;display:flex;align-items:center;justify-content:center;gap:5px">
+        <button onclick="enterLiveModeAndGo('T')" style="padding:13px 6px;background:rgba(255,255,255,.55);border:1.5px solid rgba(60,110,180,.3);border-radius:10px;color:#1a4a7a;font-family:'Oswald',sans-serif;font-size:14px;letter-spacing:.4px;cursor:pointer;text-transform:uppercase;display:flex;align-items:center;justify-content:center;gap:5px">
           👥 ÉQUIPES
         </button>
-        <button onclick="enterLiveModeAndGo('R')" style="padding:13px 6px;background:rgba(255,255,255,.08);border:1.5px solid rgba(255,255,255,.2);border-radius:10px;color:#c0d8f8;font-family:'Oswald',sans-serif;font-size:14px;letter-spacing:.4px;cursor:pointer;text-transform:uppercase;display:flex;align-items:center;justify-content:center;gap:5px">
+        <button onclick="enterLiveModeAndGo('R')" style="padding:13px 6px;background:rgba(255,255,255,.55);border:1.5px solid rgba(60,110,180,.3);border-radius:10px;color:#1a4a7a;font-family:'Oswald',sans-serif;font-size:14px;letter-spacing:.4px;cursor:pointer;text-transform:uppercase;display:flex;align-items:center;justify-content:center;gap:5px">
           📋 RÈGLEMENT
         </button>
-        <button onclick="enterLiveModeAndGo('TV')" style="padding:13px 6px;background:rgba(255,255,255,.08);border:1.5px solid rgba(255,255,255,.2);border-radius:10px;color:#c0d8f8;font-family:'Oswald',sans-serif;font-size:14px;letter-spacing:.4px;cursor:pointer;text-transform:uppercase;display:flex;align-items:center;justify-content:center;gap:5px">
+        <button onclick="enterLiveModeAndGo('TV')" style="padding:13px 6px;background:rgba(255,255,255,.55);border:1.5px solid rgba(60,110,180,.3);border-radius:10px;color:#1a4a7a;font-family:'Oswald',sans-serif;font-size:14px;letter-spacing:.4px;cursor:pointer;text-transform:uppercase;display:flex;align-items:center;justify-content:center;gap:5px">
           📺 ÉCRAN
         </button>
       </div>
     </div>
 
     <!-- ══ ZONE STAFF ══ -->
-    <div style="background:var(--s2);border:2px solid var(--bdr2);border-radius:14px;padding:16px">
-      <div style="font-family:'Oswald',sans-serif;font-size:16px;font-weight:700;letter-spacing:1px;color:var(--ylw);text-align:center;margin-bottom:12px;text-transform:uppercase">🔑 Connexion Staff</div>
+    <div style="background:linear-gradient(135deg,#fdf3e2,#faead0);border-radius:14px;padding:16px;border:2px solid rgba(200,150,50,.35)">
+      <div style="font-family:'Oswald',sans-serif;font-size:16px;font-weight:700;letter-spacing:1px;color:#9a6a10;text-align:center;margin-bottom:2px;text-transform:uppercase">🔑 Connexion Staff</div>
+      <div style="text-align:center;font-size:11px;color:#a3843e;margin-bottom:12px;letter-spacing:.5px">Accès privé</div>
       <div class="login-form">
         <div>
           <label>Email</label>
