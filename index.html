@@ -1083,6 +1083,7 @@ function shuffle(arr){
 function tObj(id){ return ST.teams.find(x=>x.id===id); }
 function tName(id){ const t=tObj(id); return t?t.name:'?'; }
 function tClub(id){ const t=tObj(id); return t?t.club:''; }
+function tPlayers(id){ const t=tObj(id); return t&&(t.p1||t.p2)?[t.p1,t.p2].filter(Boolean).join(' & '):''; }
 
 function makeRoundMatches(active, maxCourts, oppCount){
   const maxMatches=Math.min(Math.floor(active.length/2), maxCourts);
@@ -1334,9 +1335,9 @@ function renderGen(){
         ${h.label?`<div class="wave-hdr"><span>${h.label}</span></div>`:''}
         ${h.matches.map((m,mi)=>`<div class="rp-match">
           <span class="rp-court">T${mi+1}</span>
-          <span class="rp-pair"><strong>${tName(m.tA)}</strong> <span style="font-size:10px;color:var(--muted)">${tClub(m.tA)}</span></span>
+          <span class="rp-pair"><strong>${tName(m.tA)}</strong> <span style="font-size:10px;color:var(--muted)">${tClub(m.tA)}</span>${tPlayers(m.tA)?`<br><span style="font-size:10px;font-weight:400;color:var(--muted)">👤 ${tPlayers(m.tA)}</span>`:''}</span>
           <span class="rp-vs">VS</span>
-          <span class="rp-pair"><strong>${tName(m.tB)}</strong> <span style="font-size:10px;color:var(--muted)">${tClub(m.tB)}</span></span>
+          <span class="rp-pair"><strong>${tName(m.tB)}</strong> <span style="font-size:10px;color:var(--muted)">${tClub(m.tB)}</span>${tPlayers(m.tB)?`<br><span style="font-size:10px;font-weight:400;color:var(--muted)">👤 ${tPlayers(m.tB)}</span>`:''}</span>
         </div>`).join('')}
         ${h.bye?`<div class="info info-y" style="padding:6px 12px;margin-top:6px;font-size:12px">🟡 Exempte : <strong>${tName(h.bye)}</strong></div>`:''}
       </div>`).join('')}
@@ -2925,9 +2926,9 @@ window.printPlanning = function(){
       ${halls.map(h=>`${h.label?`<div style="font-size:11px;font-weight:700;color:#555;margin:5px 0 3px">${h.label}</div>`:''}
       ${h.matches.map((m,mi)=>`<div style="display:flex;align-items:center;gap:8px;padding:4px 8px;background:#fff;border:1px solid #ddd;border-radius:4px;margin-bottom:3px;font-size:12px">
         <span style="font-weight:700;color:#888;min-width:26px">T${mi+1}</span>
-        <span style="flex:1;font-weight:700">${tName(m.tA)} <span style="font-size:10px;color:#888">(${tClub(m.tA)})</span></span>
+        <span style="flex:1;font-weight:700">${tName(m.tA)} <span style="font-size:10px;color:#888">(${tClub(m.tA)})</span>${tPlayers(m.tA)?`<br><span style="font-size:10px;font-weight:400;color:#666">👤 ${tPlayers(m.tA)}</span>`:''}</span>
         <span style="color:#888;font-weight:700">VS</span>
-        <span style="flex:1;font-weight:700;text-align:right">${tName(m.tB)} <span style="font-size:10px;color:#888">(${tClub(m.tB)})</span></span>
+        <span style="flex:1;font-weight:700;text-align:right">${tName(m.tB)} <span style="font-size:10px;color:#888">(${tClub(m.tB)})</span>${tPlayers(m.tB)?`<br><span style="font-size:10px;font-weight:400;color:#666">👤 ${tPlayers(m.tB)}</span>`:''}</span>
       </div>`).join('')}`).join('')}
       </div></div>`;
   });
