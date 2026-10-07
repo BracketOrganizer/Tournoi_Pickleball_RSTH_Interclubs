@@ -1410,13 +1410,13 @@ function renderFichesPanel(){
       if(nextMatch) break;
     }
     const nextHtml = nextMatch
-      ? `<div style="font-size:11px;color:var(--blu);margin-top:4px">🕐 ${nextMatch.time} · ${nextMatch.label}${nextMatch.opp?' vs <strong>'+tName(nextMatch.opp)+'</strong>':''}</div>`
+      ? `<div style="font-size:11px;color:var(--blu);margin-top:4px">🕐 ${nextMatch.time} · ${nextMatch.label}${nextMatch.opp?' vs <strong>'+tName(nextMatch.opp)+'</strong>'+(tObj(nextMatch.opp)?' <span style="color:var(--muted)">('+tObj(nextMatch.opp).p1+' &amp; '+tObj(nextMatch.opp).p2+')</span>':''):''}</div>`
       : `<div style="font-size:11px;color:var(--grn);margin-top:4px">✅ Tous matchs joués</div>`;
     return `<div style="background:var(--s2);border:1px solid var(--bdr);border-radius:8px;padding:10px 12px;cursor:pointer" onclick="printTeamScheduleSingle('${t.id}')">
       <div style="font-weight:700;font-family:'Oswald',sans-serif;font-size:14px;color:var(--ink)">${t.name}</div>
       <div style="font-size:11px;color:var(--muted)">${t.p1} · ${t.p2}</div>
       ${nextHtml}
-      <div style="font-size:10px;color:var(--dim);margin-top:4px">🖨 Cliquer pour imprimer la fiche</div>
+      <div style="font-size:10px;color:var(--dim);margin-top:4px">📋 Cliquer pour ouvrir la fiche</div>
     </div>`;
   }).join('');
 }
@@ -1464,7 +1464,7 @@ function renderTeamsSpecPage(){
         <td style="color:var(--muted);font-size:10px">${row.wave}</td>
         <td style="font-weight:700;color:var(--blu)">${row.time}</td>
         <td style="color:var(--dim);font-size:11px">${row.court}</td>
-        <td style="font-size:11px"><strong>${oppObj?oppObj.name:row.opp}</strong>${oppObj&&oppObj.club&&oppObj.club!=='—'?`<br><span style='font-size:9px;color:var(--muted)'>${oppObj.club}</span>`:''}</td>
+        <td style="font-size:11px"><strong>${oppObj?oppObj.name:row.opp}</strong>${oppObj&&oppObj.club&&oppObj.club!=='—'?`<br><span style='font-size:9px;color:var(--muted)'>${oppObj.club}</span>`:''}${oppObj?`<br><span style='font-size:9px;color:var(--dim)'>👤 ${oppObj.p1} &amp; ${oppObj.p2}</span>`:''}</td>
         <td style="text-align:center;color:${row.color};font-size:12px">${row.done?`<strong>${row.myS}–${row.oppS}</strong> ${row.result}`:'<span style="color:var(--dim)">–</span>'}</td>
       </tr>`;
     }).join('');
@@ -1483,7 +1483,7 @@ function renderTeamsSpecPage(){
         </tr></thead>
         <tbody>${rowsHtml}</tbody>
       </table>`:'<div style="color:var(--muted);font-size:11px">Planning non généré</div>'}
-      <div style="font-size:10px;color:var(--dim);margin-top:8px;text-align:right">🖨 Cliquer pour imprimer</div>
+      <div style="font-size:10px;color:var(--dim);margin-top:8px;text-align:right">📋 Cliquer pour ouvrir la fiche</div>
     </div>`;
   }).join('');
 }
@@ -2877,6 +2877,43 @@ window.toggleSound = function(){ _soundEnabled=!_soundEnabled; const btn=documen
 // ══════════════════════════════════════════════════════════
 // IMPRESSION
 // ══════════════════════════════════════════════════════════
+// ── Aperçu d'impression intégré à la page (pas de popup → rien n'est bloqué par le navigateur) ──
+window.closePrintModal = function(){ const m=document.getElementById('printModal'); if(m) m.remove(); };
+window.printPrintModal = function(){
+  const fr=document.getElementById('printModalFrame');
+  if(fr&&fr.contentWindow){ fr.contentWindow.focus(); fr.contentWindow.print(); }
+};
+function _showPrintModal(title,html){
+  closePrintModal();
+  const m=document.createElement('div');
+  m.id='printModal';
+  m.style.cssText='position:fixed;left:0;top:0;right:0;bottom:0;z-index:99999;background:#fff;display:flex;flex-direction:column';
+  const bar=document.createElement('div');
+  bar.style.cssText='display:flex;align-items:center;gap:10px;padding:8px 12px;background:#1a2540;color:#fff;font-family:Arial,sans-serif;font-size:14px;flex-wrap:wrap';
+  const ttl=document.createElement('strong'); ttl.style.flex='1'; ttl.textContent=title; bar.appendChild(ttl);
+  const bp=document.createElement('button'); bp.textContent='🖨 Imprimer';
+  bp.style.cssText='padding:6px 16px;background:#1a7a3a;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px';
+  bp.onclick=()=>printPrintModal();
+  const bc=document.createElement('button'); bc.textContent='✖ Fermer';
+  bc.style.cssText='padding:6px 16px;background:#eee;color:#111;border:none;border-radius:6px;cursor:pointer;font-size:13px';
+  bc.onclick=()=>closePrintModal();
+  bar.appendChild(bp); bar.appendChild(bc);
+  const fr=document.createElement('iframe');
+  fr.id='printModalFrame'; fr.style.cssText='flex:1;border:0;width:100%;background:#fff';
+  m.appendChild(bar); m.appendChild(fr);
+  document.body.appendChild(m);
+  fr.srcdoc=html;
+}
+// Même interface que window.open(...) pour les fonctions d'impression existantes
+function _printWin(title){
+  let html='';
+  return {
+    document:{ write(h){ html+=h; }, close(){ _showPrintModal(title,html); } },
+    print(){ printPrintModal(); },
+    close(){ closePrintModal(); }
+  };
+}
+
 window.printPlanning = function(){
   let body=`<div style="font-size:18px;font-weight:700;margin-bottom:14px;border-bottom:2px solid #333;padding-bottom:8px">Planning Interclub Pickleball · ${ST.teams.slice(0,ST.cfg.n).length} équipes</div>`;
   ST.schedule.forEach((rd,ri)=>{
@@ -2894,7 +2931,7 @@ window.printPlanning = function(){
       </div>`).join('')}`).join('')}
       </div></div>`;
   });
-  const win=window.open('','_planning','width=900,height=700');
+  const win=_printWin('Planning');
   win.document.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Planning Interclub</title><style>body{margin:16px;font-family:sans-serif;font-size:12px}@media print{.noprint{display:none}}</style></head><body>'+body+'<div class="noprint" style="margin-top:20px"><button onclick="window.print()">Imprimer</button></div></body></html>');
   win.document.close(); setTimeout(()=>win.print(),400);
 };
@@ -2902,7 +2939,7 @@ window.printStandings = function(){
   const st=computeStandings();
   const rows=st.map((s,i)=>{const gd=s.gf-s.ga;return `<tr><td>${i+1}</td><td>${s.name} (${s.club})<br><small>${s.p1} · ${s.p2}</small></td><td>${s.played}</td><td>${s.w}</td><td>${s.d}</td><td>${s.l}</td><td>${s.gf}</td><td>${s.ga}</td><td>${gd>0?'+':''}${gd}</td><td><strong>${s.pts}</strong></td></tr>`;}).join('');
   const body=`<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;width:100%;font-family:sans-serif;font-size:12px"><thead><tr style="background:#0d1a2e;color:#fff"><th>#</th><th>Équipe</th><th>J</th><th>V</th><th>N</th><th>D</th><th>BP</th><th>BC</th><th>+/-</th><th>Pts</th></tr></thead><tbody>${rows}</tbody></table>`;
-  const win=window.open('','_standings','width=900,height=700');
+  const win=_printWin('Classement');
   win.document.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Classement</title></head><body>'+body+'<div style="margin-top:20px"><button onclick="window.print()">Imprimer</button></div></body></html>');
   win.document.close(); setTimeout(()=>win.print(),400);
 };
@@ -3228,7 +3265,7 @@ window.printAllTeamSchedules = function(){
     for(let i=0;i<slips.length;i+=per) o+=`<div class="sheet per${per}">${slips.slice(i,i+per).join('')}</div>`;
     return o;
   };
-  const win=window.open('','_allfiches','width=1000,height=800');
+  const win=_printWin('Fiches équipes');
   win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fiches équipes</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
@@ -3299,8 +3336,7 @@ window.printAllTeamSchedules = function(){
         <option value="d">Ancien format dense (avec scores)</option>
       </select>
     </label>
-    <button onclick="window.print()" style="background:#1a7a3a;color:#fff;border:none;border-radius:6px;cursor:pointer">🖨 Imprimer</button>
-    <span style="font-size:11px;color:#666">Programme complet matin + après-midi · à découper selon les pointillés · désactivez les en-têtes/pieds de page dans les options d'impression</span>
+    <span style="font-size:11px;color:#666">Programme complet matin + après-midi · à découper selon les pointillés · cliquez sur « Imprimer » (barre du haut) · désactivez les en-têtes/pieds de page dans les options d'impression</span>
   </div>
   <div class="view" id="v2">${pages(2)}</div>
   <div class="view" id="v3">${pages(3)}</div>
@@ -3316,7 +3352,7 @@ window.printAllTeamSchedules = function(){
 window.printTeamScheduleSingle = function(tid){
   const html=printTeamSchedule(tid); if(!html) return;
   const team=tObj(tid); if(!team) return;
-  const win=window.open('','_team_'+tid,'width=900,height=600');
+  const win=_printWin('Fiche '+team.name);
   win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fiche ${team.name}</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
@@ -3341,12 +3377,8 @@ window.printTeamScheduleSingle = function(tid){
     }
   </style></head><body>
   ${html}
-  <div class="noprint" style="margin-top:14px;display:flex;gap:8px">
-    <button onclick="window.print()" style="padding:7px 20px;background:#1a7a3a;color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:13px">🖨 Imprimer</button>
-    <button onclick="window.close()" style="padding:7px 16px;background:#eee;border:none;border-radius:6px;cursor:pointer;font-size:13px">Fermer</button>
-  </div>
   </body></html>`);
-  win.document.close(); setTimeout(()=>win.print(),400);
+  win.document.close();
 };
 
 // ══════════════════════════════════════════════════════════
@@ -3401,7 +3433,7 @@ window.exportStandingsPDF = function(){
       V=Victoire (3pts) · N=Nul (2pts) · D=Défaite (0pt) · BP=Buts pour · BC=Buts contre · +/-=Goal average
     </div>`;
 
-  const win=window.open('','_classement_pdf','width=1000,height=750');
+  const win=_printWin('Classement Interclub');
   win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Classement Interclub</title>
   <style>
     body{margin:16px 20px;font-size:12px}
@@ -4351,7 +4383,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
 <div class="wrap">
   <div class="sec-ttl">👥 Programme des équipes</div>
   <div id="teamsSpecInfo" class="info info-b" style="margin-bottom:14px;font-size:12px">
-    Cliquez sur une équipe pour afficher et imprimer son programme complet.
+    Cliquez sur une équipe pour ouvrir son programme complet (vous pourrez ensuite l'imprimer).
   </div>
   <div id="teamsSpecGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px"></div>
 </div>
