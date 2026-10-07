@@ -3240,10 +3240,20 @@ window.printAllTeamSchedules = function(){
     .sheet.per2{grid-template-columns:1fr;grid-template-rows:1fr 1fr}
     .sheet.per3{grid-template-columns:1fr;grid-template-rows:repeat(3,1fr)}
     .sheet.per4{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
+    .sheet.per6{grid-template-columns:1fr 1fr;grid-template-rows:repeat(3,1fr)}
+    .sheet.per8{grid-template-columns:1fr 1fr;grid-template-rows:repeat(4,1fr)}
     .slip{border:1.5px dashed #555;padding:4mm 5mm;overflow:hidden;font-size:11px}
     .per2 .slip{font-size:14px;padding:6mm 10mm}
-    .per3 .slip{font-size:12px;padding:4mm 8mm}
+    .per3 .slip{font-size:11px;padding:3mm 8mm}
+    .per3 .slip td{padding:2px 6px}
     .per4 .slip{font-size:10.5px}
+    .per6 .slip{font-size:9.5px;padding:3mm 4mm}
+    .per6 .slip td{padding:1.5px 5px}
+    .per8 .slip{font-size:8px;padding:1.5mm 3mm}
+    .per8 .slip td{padding:.5px 4px}
+    .per8 .slip-hdr{font-size:1.25em}
+    .per8 .slip-pl{margin-bottom:2px}
+    .per8 .slip-ft{display:none}
     .slip-hdr{font-size:1.35em;font-weight:700;padding-bottom:3px;border-bottom:2px solid #1a2540;margin-bottom:3px}
     .badge{background:#e8f0ff;color:#1560c0;border-radius:4px;padding:1px 6px;font-size:.6em;font-weight:700;vertical-align:middle}
     .slip-pl{color:#444;margin-bottom:5px;font-size:.95em}
@@ -3284,6 +3294,8 @@ window.printAllTeamSchedules = function(){
         <option value="2">2 équipes par feuille A4</option>
         <option value="3">3 équipes par feuille A4</option>
         <option value="4" selected>4 équipes par feuille A4</option>
+        <option value="6">6 équipes par feuille A4</option>
+        <option value="8">8 équipes par feuille A4 (serré)</option>
         <option value="d">Ancien format dense (avec scores)</option>
       </select>
     </label>
@@ -3293,6 +3305,8 @@ window.printAllTeamSchedules = function(){
   <div class="view" id="v2">${pages(2)}</div>
   <div class="view" id="v3">${pages(3)}</div>
   <div class="view on" id="v4">${pages(4)}</div>
+  <div class="view" id="v6">${pages(6)}</div>
+  <div class="view" id="v8">${pages(8)}</div>
   <div class="view grid" id="vd">${dense.join('')}</div>
   </body></html>`);
   win.document.close();
