@@ -2855,7 +2855,17 @@ function fmt(s){ return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60
 // État d'une salle : { state:'idle'|'running'|'paused', mode:'match'|'trans', rem:<ms restantes
 // au moment 'at'>, at:<Date.now() du démarrage> }. Chaque appareil calcule lui-même le temps
 // restant -> aucun envoi par seconde, et même affichage partout.
-let _tkLast = {}, _tkSig = '', _sndRoleInit = false;
+let _tkLast = {}, _tkSig = '', _sndRoleInit = false, _sndMode = 'all'; // _sndMode : 'none' | 'h1'..'h4' | 'all' (choix propre à chaque appareil)
+function timerSoundWants(k){
+  if(_sndMode==='none') return false;
+  if(timerIsLinked()) return true;           // un seul chrono : une seule sonnerie
+  return _sndMode==='all' || _sndMode===k;
+}
+window.timerSetSound = function(m){
+  _sndMode=m; _soundEnabled = m!=='none';
+  try{ localStorage.setItem('tkSoundMode', m); }catch(e){}
+  _getAC(); try{ _unlockAudio(); }catch(e){}
+};
 function timerIdle(){ return {state:'idle', mode:'match', rem:0, at:0}; }
 function timersDefault(){ const t={linked:true}; for(let i=1;i<=4;i++) t['h'+i]=timerIdle(); return t; }
 function timerHallKeys(){ const n=Math.min(4,Math.max(1,+(ST.cfg&&ST.cfg.halls)||1)); return Array.from({length:n},(_,i)=>'h'+(i+1)); }
@@ -2886,7 +2896,11 @@ function renderTimerPanel(){
   const anyActive = dispKeys.some(k=>timerView(k).status!=='idle');
   _tkSig = dispKeys.map(k=>timerView(k).status).join(',')+'|'+keys.length+'|'+linked;
   // Spectateurs : son coupé par défaut (ils peuvent l'activer)
-  if(!_sndRoleInit && USER_ROLE){ _sndRoleInit=true; if(USER_ROLE==='spectator') _soundEnabled=false; }
+  if(!_sndRoleInit && USER_ROLE){
+    _sndRoleInit=true; let m=null; try{ m=localStorage.getItem('tkSoundMode'); }catch(e){}
+    if(!['none','h1','h2','h3','h4','all'].includes(m)) m = USER_ROLE==='spectator' ? 'none' : 'all';
+    _sndMode=m; _soundEnabled = m!=='none';
+  }
   // Page matchs : visible pour admin/scorer en permanence, pour les spectateurs seulement quand un chrono tourne
   const wrap=document.getElementById('timerWrap');
   if(wrap) wrap.classList.toggle('timer-idle-hide', !isScorer() && !anyActive);
@@ -2895,7 +2909,15 @@ function renderTimerPanel(){
     clk.className='timer-clocks'+(dispKeys.length>1?' multi':'');
     clk.innerHTML=dispKeys.map(k=>`<div class="timer-clk"><div class="timer-lbl" data-tkl="${k}" data-title="${titleOf(k)}">⏱ CHRONO</div><div class="timer-big tc-idle" data-tk="${k}">--:--</div></div>`).join('');
   }
-  const snd=document.getElementById('soundToggle'); if(snd) snd.textContent=_soundEnabled?'🔊':'🔇';
+  const sel=document.getElementById('soundSel');
+  if(sel){
+    const split = multi && !linked;
+    const opts = split
+      ? [['none','🔇 Aucune'], ...keys.map(k=>[k,'🔔 Salle '+k.slice(1)+' seulement']), ['all','🔔 Toutes les salles (sons différents)']]
+      : [['none','🔇 Son coupé'], ['all','🔊 Son activé']];
+    let cur=_sndMode; if(!opts.some(o=>o[0]===cur)) cur = cur==='none' ? 'none' : 'all';
+    sel.innerHTML=opts.map(o=>`<option value="${o[0]}" ${o[0]===cur?'selected':''}>${o[1]}</option>`).join('');
+  }
   // Commandes : admin uniquement
   const ctl=document.getElementById('timerCtl');
   if(ctl){
@@ -2942,8 +2964,8 @@ function timerTick(){
     const v=timerView(el.dataset.tkl), t=el.dataset.title, short=el.dataset.short==='1';
     el.textContent = (t ? t+' · ' : '') + timerLabelText(v, short);
   });
-  // Sons : un seul signal par seconde, même avec 2 salles
-  const rank={beep:1,last:2,warn:3,siren:4}; let ev=null;
+  // Sons : selon le choix de CET appareil (salle 1, salle 2 ou les deux)
+  const evs=[];
   dk.forEach(k=>{
     const v=timerView(k);
     const cur=(v.status==='running'||v.status==='done') ? v.sec : null;
@@ -2951,12 +2973,22 @@ function timerTick(){
     if(cur===null || prev==null || prev===cur) return;
     let e=null;
     if(cur===0) e='siren'; else if(cur===30) e='warn'; else if(cur>=1&&cur<=5) e = cur===1?'last':'beep';
-    if(e && (!ev || rank[e]>rank[ev])) ev=e;
+    if(e && timerSoundWants(k)) evs.push({k,e});
   });
-  if(ev==='siren') _playSiren(2.5,0.9);
-  else if(ev==='warn') _playWarn30();
-  else if(ev==='last') _playCountdownBeep(true);
-  else if(ev==='beep') _playCountdownBeep(false);
+  // Si on écoute plusieurs salles : chaque salle a sa hauteur de son (salle 2 plus aiguë...) et les sirènes se suivent
+  const multiSound = !timerIsLinked() && _sndMode==='all';
+  let sirenN=0;
+  evs.forEach(({k,e})=>{
+    const pitch = multiSound ? [1,1.4,1.8,2.2][(+k.slice(1))-1] : 1;
+    const delay = e==='siren' ? (sirenN++)*2800 : 0;
+    const go=()=>{ const old=_tkPitch; _tkPitch=pitch;
+      try{ if(e==='siren') _playSiren(2.5,0.9); else if(e==='warn') _playWarn30(); else _playCountdownBeep(e==='last'); }
+      finally{ _tkPitch=old; } };
+    if(delay) setTimeout(go,delay); else go();
+    if(e==='siren'||e==='warn') document.querySelectorAll('[data-tk="'+k+'"]').forEach(el=>{
+      const par=el.parentElement; if(!par) return; par.classList.add('tk-ring'); setTimeout(()=>par.classList.remove('tk-ring'),3000);
+    });
+  });
 }
 function updateTimerDisplay(){ renderTimerPanel(); }
 setInterval(timerTick, 250);
@@ -3003,14 +3035,14 @@ window.timerSetLinked = async function(on){
 };
 
 // ── AUDIO ───────────────────────────────────────────────
-let _AC=null, _soundEnabled=true;
+let _AC=null, _soundEnabled=true, _tkPitch=1;
 function _getAC(){ if(!_AC||_AC.state==='closed'){ try{ _AC=new(window.AudioContext||window.webkitAudioContext)(); }catch(e){ _AC=null; } } if(_AC&&_AC.state==='suspended') _AC.resume(); return _AC; }
-function _playTone(freq,dur,type='sine',attack=0.01,vol=0.8,startDelay=0){ const ac=_getAC(); if(!ac||!_soundEnabled) return; const t=ac.currentTime+startDelay; const osc=ac.createOscillator(); const gain=ac.createGain(); osc.connect(gain);gain.connect(ac.destination);osc.type=type;osc.frequency.setValueAtTime(freq,t);gain.gain.setValueAtTime(0,t);gain.gain.linearRampToValueAtTime(vol,t+attack);gain.gain.setValueAtTime(vol,t+dur-0.05);gain.gain.linearRampToValueAtTime(0,t+dur);osc.start(t);osc.stop(t+dur); }
-function _playSiren(durationSec=2.5,vol=0.9){ const ac=_getAC(); if(!ac||!_soundEnabled) return; const t=ac.currentTime; for(let i=0;i<3;i++){ const osc=ac.createOscillator(); const gain=ac.createGain(); osc.connect(gain);gain.connect(ac.destination);osc.type='sawtooth';const cd=durationSec/3;const s=t+i*cd;osc.frequency.setValueAtTime(400,s);osc.frequency.linearRampToValueAtTime(900,s+cd*0.6);osc.frequency.linearRampToValueAtTime(600,s+cd);gain.gain.setValueAtTime(0,s);gain.gain.linearRampToValueAtTime(vol,s+0.03);gain.gain.setValueAtTime(vol,s+cd-0.05);gain.gain.linearRampToValueAtTime(0,s+cd);osc.start(s);osc.stop(s+cd+0.01); } }
+function _playTone(freq,dur,type='sine',attack=0.01,vol=0.8,startDelay=0){ const ac=_getAC(); if(!ac||!_soundEnabled) return; const t=ac.currentTime+startDelay; const osc=ac.createOscillator(); const gain=ac.createGain(); osc.connect(gain);gain.connect(ac.destination);osc.type=type;osc.frequency.setValueAtTime(freq*_tkPitch,t);gain.gain.setValueAtTime(0,t);gain.gain.linearRampToValueAtTime(vol,t+attack);gain.gain.setValueAtTime(vol,t+dur-0.05);gain.gain.linearRampToValueAtTime(0,t+dur);osc.start(t);osc.stop(t+dur); }
+function _playSiren(durationSec=2.5,vol=0.9){ const ac=_getAC(); if(!ac||!_soundEnabled) return; const t=ac.currentTime; for(let i=0;i<3;i++){ const osc=ac.createOscillator(); const gain=ac.createGain(); osc.connect(gain);gain.connect(ac.destination);osc.type='sawtooth';const cd=durationSec/3;const s=t+i*cd;osc.frequency.setValueAtTime(400*_tkPitch,s);osc.frequency.linearRampToValueAtTime(900*_tkPitch,s+cd*0.6);osc.frequency.linearRampToValueAtTime(600*_tkPitch,s+cd);gain.gain.setValueAtTime(0,s);gain.gain.linearRampToValueAtTime(vol,s+0.03);gain.gain.setValueAtTime(vol,s+cd-0.05);gain.gain.linearRampToValueAtTime(0,s+cd);osc.start(s);osc.stop(s+cd+0.01); } }
 function _playWarn30(){ if(!_soundEnabled) return; for(let rep=0;rep<2;rep++){ _playTone(880,0.12,'sine',0.005,0.75,rep*0.55); _playTone(1100,0.15,'sine',0.005,0.75,rep*0.55+0.18); } }
 function _playCountdownBeep(isLast){ if(!_soundEnabled) return; if(isLast){ _playTone(660,0.08,'square',0.005,0.8);_playTone(880,0.10,'square',0.005,0.8,0.12); }else _playTone(660,0.08,'square',0.005,0.65); }
 function _unlockAudio(){ _getAC(); const ac=_AC; if(!ac) return; const buf=ac.createBuffer(1,1,22050); const src=ac.createBufferSource(); src.buffer=buf;src.connect(ac.destination);src.start(0); }
-window.toggleSound = function(){ _soundEnabled=!_soundEnabled; const btn=document.getElementById('soundToggle'); if(btn) btn.textContent=_soundEnabled?'🔊':'🔇'; _getAC(); };
+window.toggleSound = function(){ _getAC(); };
 
 // ══════════════════════════════════════════════════════════
 // IMPRESSION
@@ -3806,6 +3838,9 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
 .timer-ctl{ display:flex;flex-direction:column;gap:8px;align-items:flex-end; }
 .timer-ctl-grp{ display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;align-items:center; }
 .timer-ctl-ttl{ font-size:11px;font-weight:700;color:var(--muted);margin-right:4px; }
+.timer-snd-lbl{ font-size:12px;color:var(--muted); }
+.timer-snd-lbl select{ font-size:12px;padding:3px 6px;border-radius:6px;border:1px solid var(--bdr2);background:var(--s1);color:var(--ink2); }
+.timer-clk.tk-ring,.tv-tk-item.tk-ring{ outline:3px solid #e0a000;outline-offset:3px;border-radius:12px;animation:blink .5s ease-in-out 6; }
 .timer-link-lbl{ font-size:12px;color:var(--muted);cursor:pointer; }
 .timer-wrap.timer-idle-hide{ display:none!important; }
 
@@ -4470,7 +4505,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
     <div class="timer-clocks" id="timerClocks"></div>
     <div class="timer-btns">
       <div class="timer-ctl" id="timerCtl"></div>
-      <button class="btn btn-ghost btn-xs" id="soundToggle" onclick="toggleSound()" title="Son on/off">🔊</button>
+      <label class="timer-snd-lbl">🔔 Sonnerie sur cet appareil : <select id="soundSel" onchange="timerSetSound(this.value)"></select></label>
     </div>
   </div>
 
