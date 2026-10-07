@@ -333,6 +333,8 @@ function subscribeToTournamentPublic(){
     if(data.teams)    ST.teams    = data.teams;
     if(data.schedule) ST.schedule = data.schedule;
     if(data.activeRound!=null) ST.activeRound = data.activeRound;
+    if(data.timers) ST.timers = data.timers;
+    renderTimerPanel();
     handleLiveOpenChange(data.liveOpen === true);
     if(ST.page===4) renderTournament();
     if(ST.page===5) renderFinal();
@@ -374,6 +376,8 @@ function subscribeToTournament(){
     if(data.teams)    ST.teams    = data.teams;
     if(data.schedule) ST.schedule = data.schedule;
     if(data.activeRound!=null) ST.activeRound = data.activeRound;
+    if(data.timers) ST.timers = data.timers;
+    renderTimerPanel();
     handleLiveOpenChange(data.liveOpen === true);
     if(ST.page===2) renderTeams();
     if(ST.page===3) renderGen();
@@ -665,6 +669,7 @@ function applyRoleUI(){
   updateFwdBtn();
   updateLiveToggleBtn();
   syncDrawerButtons();
+  renderTimerPanel();
 }
 function updateStepVisibility(){
   [1,2,3].forEach(n=>{
@@ -1640,7 +1645,8 @@ window.newTournament = async function(){
   ST.teams=[]; ST.schedule=[]; ST.results={}; ST.activeRound=0;
   ST.timerSec=0; ST.timerRun=false; ST.rulesOpen=false;
   document.getElementById('ruleBtn').textContent='📋 Règlement';
-  await saveTournament({ cfg:ST.cfg, teams:[], schedule:[], activeRound:0, status:'setup' });
+  ST.timers = timersDefault();
+  await saveTournament({ cfg:ST.cfg, teams:[], schedule:[], activeRound:0, status:'setup', timers:ST.timers });
   renderTeams(); goTo(1); onCfgChange();
 };
 window.resetAllScores = async function(){
@@ -2843,26 +2849,157 @@ window.goToLive = function(){
 // TIMER
 // ══════════════════════════════════════════════════════════
 function fmt(s){ return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); }
-function updateTimerDisplay(){
-  const el=document.getElementById('tmrDsp'); if(!el) return;
-  const s=ST.timerSec;
-  el.textContent=fmt(s);
-  el.className='timer-big '+(s===0?'tc-zero':ST.timerMode==='match'?'tc-match':'tc-trans');
-  document.getElementById('tmrLbl').textContent=ST.timerMode==='match'?`⏱ MATCH — ${ST.cfg.mt} min`:`⏸ TRANSITION — ${ST.cfg.tt} min`;
-  if(ST.timerRun){ if(s===0) _playSiren(2.5,0.9); else if(s===30) _playWarn30(); else if(s>=1&&s<=5) _playCountdownBeep(s===1); }
+
+// Chrono PARTAGÉ : l'état est stocké dans interclub/current.timers (lu en temps réel par
+// admin, scorer, spectateurs et écran). Seul l'admin écrit ; les autres ne font que regarder.
+// État d'une salle : { state:'idle'|'running'|'paused', mode:'match'|'trans', rem:<ms restantes
+// au moment 'at'>, at:<Date.now() du démarrage> }. Chaque appareil calcule lui-même le temps
+// restant -> aucun envoi par seconde, et même affichage partout.
+let _tkLast = {}, _tkSig = '', _sndRoleInit = false;
+function timerIdle(){ return {state:'idle', mode:'match', rem:0, at:0}; }
+function timersDefault(){ const t={linked:true}; for(let i=1;i<=4;i++) t['h'+i]=timerIdle(); return t; }
+function timerHallKeys(){ const n=Math.min(4,Math.max(1,+(ST.cfg&&ST.cfg.halls)||1)); return Array.from({length:n},(_,i)=>'h'+(i+1)); }
+function timerIsLinked(){ return !ST.timers || ST.timers.linked!==false || timerHallKeys().length<2; }
+function timerView(key){
+  const t=(ST.timers&&ST.timers[key])||timerIdle();
+  let ms=t.rem||0;
+  if(t.state==='running') ms=Math.max(0, ms-(Date.now()-(t.at||0)));
+  const sec=Math.ceil(ms/1000);
+  let status='idle';
+  if(t.state==='paused') status='paused';
+  else if(t.state==='running') status = sec>0 ? 'running' : 'done';
+  return {status, mode:t.mode==='trans'?'trans':'match', sec, ms};
 }
-window.startTimer = function(mode){
-  _unlockAudio(); clearInterval(ST.timerIv); ST.timerMode=mode;
-  const secs=mode==='match'?ST.cfg.mt:ST.cfg.tt;
-  ST.timerSec=secs*60; ST.timerRun=true; updateTimerDisplay();
-  document.getElementById('tmrP').style.display=''; document.getElementById('tmrR').style.display='none';
-  ST.timerIv=setInterval(()=>{ if(ST.timerSec>0){ ST.timerSec--;updateTimerDisplay(); } else { clearInterval(ST.timerIv);ST.timerRun=false;document.getElementById('tmrP').style.display='none'; } },1000);
+function timerTargets(grp){ return grp==='all' ? timerHallKeys() : [grp]; }
+function timerLabelText(v, short){
+  if(v.status==='idle') return short ? 'CHRONO' : '⏱ CHRONO';
+  const base = v.mode==='match'
+    ? (short ? 'MATCH' : `⏱ MATCH — ${ST.cfg.mt} min`)
+    : (short ? 'TRANSITION' : `⏸ TRANSITION — ${ST.cfg.tt} min`);
+  return base + (v.status==='paused' ? ' · EN PAUSE' : '');
+}
+function renderTimerPanel(){
+  if(!ST.timers) ST.timers = timersDefault();
+  const keys=timerHallKeys(), linked=timerIsLinked(), multi=keys.length>1;
+  const dispKeys = linked ? ['h1'] : keys;
+  const titleOf = k => !multi ? '' : (linked ? 'Toutes les salles' : 'Salle '+k.slice(1));
+  const anyActive = dispKeys.some(k=>timerView(k).status!=='idle');
+  _tkSig = dispKeys.map(k=>timerView(k).status).join(',')+'|'+keys.length+'|'+linked;
+  // Spectateurs : son coupé par défaut (ils peuvent l'activer)
+  if(!_sndRoleInit && USER_ROLE){ _sndRoleInit=true; if(USER_ROLE==='spectator') _soundEnabled=false; }
+  // Page matchs : visible pour admin/scorer en permanence, pour les spectateurs seulement quand un chrono tourne
+  const wrap=document.getElementById('timerWrap');
+  if(wrap) wrap.classList.toggle('timer-idle-hide', !isScorer() && !anyActive);
+  const clk=document.getElementById('timerClocks');
+  if(clk){
+    clk.className='timer-clocks'+(dispKeys.length>1?' multi':'');
+    clk.innerHTML=dispKeys.map(k=>`<div class="timer-clk"><div class="timer-lbl" data-tkl="${k}" data-title="${titleOf(k)}">⏱ CHRONO</div><div class="timer-big tc-idle" data-tk="${k}">--:--</div></div>`).join('');
+  }
+  const snd=document.getElementById('soundToggle'); if(snd) snd.textContent=_soundEnabled?'🔊':'🔇';
+  // Commandes : admin uniquement
+  const ctl=document.getElementById('timerCtl');
+  if(ctl){
+    if(!isAdmin()){ ctl.innerHTML=''; }
+    else {
+      const groups = linked ? ['all'] : keys;
+      let html = groups.map(g=>{
+        const v=timerView(g==='all'?'h1':g);
+        const ttl = multi ? (g==='all' ? 'Toutes les salles' : 'Salle '+g.slice(1)) : '';
+        return `<div class="timer-ctl-grp">${ttl?`<span class="timer-ctl-ttl">${ttl}</span>`:''}
+          <button class="btn btn-g btn-sm" onclick="timerStart('match','${g}')">▶ Match</button>
+          <button class="btn btn-ghost btn-sm" onclick="timerStart('trans','${g}')">⏸ Transition</button>
+          ${v.status==='running'?`<button class="btn btn-ghost btn-xs" onclick="timerPause('${g}')">⏸ Pause</button>`:''}
+          ${v.status==='paused'?`<button class="btn btn-ghost btn-xs" onclick="timerResume('${g}')">▶ Reprendre</button>`:''}
+          ${v.status!=='idle'?`<button class="btn btn-ghost btn-xs" onclick="timerReset('${g}')">⏹ Remise à zéro</button>`:''}
+        </div>`;
+      }).join('');
+      if(multi) html += `<label class="timer-link-lbl"><input type="checkbox" ${linked?'checked':''} onchange="timerSetLinked(this.checked)"> 🔗 Chronos liés (une seule commande pour toutes les salles)</label>`;
+      ctl.innerHTML=html;
+    }
+  }
+  // Écran TV : visible seulement si un chrono est lancé
+  const tv=document.getElementById('tvTimers');
+  if(tv){
+    tv.style.display = anyActive ? '' : 'none';
+    tv.innerHTML=dispKeys.map(k=>`<div class="tv-tk-item"><span class="tv-tk-lbl" data-tkl="${k}" data-title="${titleOf(k)}" data-short="1"></span><span class="tv-tk-dig tc-idle" data-tk="${k}">--:--</span></div>`).join('');
+  }
+  timerTick();
+}
+function timerTick(){
+  const keys=timerHallKeys(), linked=timerIsLinked();
+  const dk = linked ? ['h1'] : keys;
+  const sig = dk.map(k=>timerView(k).status).join(',')+'|'+keys.length+'|'+linked;
+  if(sig!==_tkSig){ renderTimerPanel(); return; } // un chrono vient de se terminer : on rafraîchit les boutons
+  document.querySelectorAll('[data-tk]').forEach(el=>{
+    const v=timerView(el.dataset.tk);
+    el.textContent = v.status==='idle' ? '--:--' : fmt(v.sec);
+    el.classList.remove('tc-match','tc-trans','tc-zero','tc-idle','tc-pause');
+    if(v.status==='idle') el.classList.add('tc-idle');
+    else if(v.status==='done') el.classList.add('tc-zero');
+    else { el.classList.add(v.mode==='match'?'tc-match':'tc-trans'); if(v.status==='paused') el.classList.add('tc-pause'); }
+  });
+  document.querySelectorAll('[data-tkl]').forEach(el=>{
+    const v=timerView(el.dataset.tkl), t=el.dataset.title, short=el.dataset.short==='1';
+    el.textContent = (t ? t+' · ' : '') + timerLabelText(v, short);
+  });
+  // Sons : un seul signal par seconde, même avec 2 salles
+  const rank={beep:1,last:2,warn:3,siren:4}; let ev=null;
+  dk.forEach(k=>{
+    const v=timerView(k);
+    const cur=(v.status==='running'||v.status==='done') ? v.sec : null;
+    const prev=_tkLast[k]; _tkLast[k]=cur;
+    if(cur===null || prev==null || prev===cur) return;
+    let e=null;
+    if(cur===0) e='siren'; else if(cur===30) e='warn'; else if(cur>=1&&cur<=5) e = cur===1?'last':'beep';
+    if(e && (!ev || rank[e]>rank[ev])) ev=e;
+  });
+  if(ev==='siren') _playSiren(2.5,0.9);
+  else if(ev==='warn') _playWarn30();
+  else if(ev==='last') _playCountdownBeep(true);
+  else if(ev==='beep') _playCountdownBeep(false);
+}
+function updateTimerDisplay(){ renderTimerPanel(); }
+setInterval(timerTick, 250);
+document.addEventListener('pointerdown', ()=>{ try{ _unlockAudio(); }catch(e){} }, {once:true});
+
+async function timerWrite(keys, mk){
+  if(!isAdmin()) return;
+  if(!ST.timers) ST.timers = timersDefault();
+  const patch={};
+  keys.forEach(k=>{ ST.timers[k]=mk(ST.timers[k]||timerIdle(), k); patch[k]=ST.timers[k]; });
+  renderTimerPanel();
+  await saveTournament({ timers: patch });
+}
+window.timerStart = function(mode, grp){
+  if(!isAdmin()) return;
+  _unlockAudio();
+  const keys=timerTargets(grp);
+  if(keys.some(k=>{ const st=timerView(k).status; return st==='running'||st==='paused'; })
+     && !confirm('Un chrono est déjà en cours. Le relancer à zéro ?')) return;
+  const ms=(mode==='match'?ST.cfg.mt:ST.cfg.tt)*60000;
+  timerWrite(keys, ()=>({state:'running', mode, rem:ms, at:Date.now()}));
 };
-window.pauseTimer = function(){ clearInterval(ST.timerIv);ST.timerRun=false;document.getElementById('tmrP').style.display='none';document.getElementById('tmrR').style.display=''; };
-window.resumeTimer = function(){
-  _unlockAudio(); document.getElementById('tmrP').style.display=''; document.getElementById('tmrR').style.display='none';
-  ST.timerRun=true;
-  ST.timerIv=setInterval(()=>{ if(ST.timerSec>0){ ST.timerSec--;updateTimerDisplay(); } else { clearInterval(ST.timerIv);ST.timerRun=false;document.getElementById('tmrP').style.display='none'; } },1000);
+window.timerPause = function(grp){
+  timerWrite(timerTargets(grp), (t,k)=>{ const v=timerView(k); return v.status==='running' ? {state:'paused', mode:t.mode, rem:v.ms, at:0} : t; });
+};
+window.timerResume = function(grp){
+  _unlockAudio();
+  timerWrite(timerTargets(grp), (t)=> t.state==='paused' ? {state:'running', mode:t.mode, rem:t.rem, at:Date.now()} : t);
+};
+window.timerReset = function(grp){
+  timerWrite(timerTargets(grp), ()=>timerIdle());
+};
+window.timerSetLinked = async function(on){
+  if(!isAdmin()) return;
+  if(!ST.timers) ST.timers = timersDefault();
+  ST.timers.linked = !!on;
+  const patch={ linked: !!on };
+  if(on){ // on aligne toutes les salles sur le chrono de la salle 1
+    const base=ST.timers.h1||timerIdle();
+    timerHallKeys().forEach(k=>{ ST.timers[k]={...base}; patch[k]=ST.timers[k]; });
+  }
+  renderTimerPanel();
+  await saveTournament({ timers: patch });
 };
 
 // ── AUDIO ───────────────────────────────────────────────
@@ -3662,6 +3799,15 @@ input[type=checkbox]{ width:auto;margin-right:6px; }
 .timer-big.tc-zero{ color:#b02018;animation:blink 1s ease-in-out infinite; }
 @keyframes blink{ 0%,100%{opacity:1}50%{opacity:.4} }
 .timer-btns{ display:flex;flex-direction:column;gap:7px;align-items:flex-end; }
+.timer-clocks{ display:flex;gap:30px;flex-wrap:wrap;align-items:flex-start; }
+.timer-clocks.multi .timer-big{ font-size:48px; }
+.timer-big.tc-idle{ color:var(--dim); }
+.timer-big.tc-pause{ opacity:.55; }
+.timer-ctl{ display:flex;flex-direction:column;gap:8px;align-items:flex-end; }
+.timer-ctl-grp{ display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;align-items:center; }
+.timer-ctl-ttl{ font-size:11px;font-weight:700;color:var(--muted);margin-right:4px; }
+.timer-link-lbl{ font-size:12px;color:var(--muted);cursor:pointer; }
+.timer-wrap.timer-idle-hide{ display:none!important; }
 
 /* ── STANDINGS ───────────────────────────────────────── */
 .stbl{ width:100%;border-collapse:collapse;font-size:13px; }
@@ -3738,6 +3884,15 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
 .tv-phase-badge{ background:rgba(255,255,255,.1); border:1px solid rgba(255,255,255,.25); border-radius:30px; padding:6px 16px; font-size:clamp(12px,1.3vw,16px); font-family:'Oswald',sans-serif; letter-spacing:.6px; }
 .tv-clock{ margin-left:auto; font-family:'Oswald',sans-serif; font-size:clamp(20px,2.6vw,34px); font-weight:700; font-variant-numeric:tabular-nums; color:#7affa0; }
 
+.tv-timers{ display:flex;gap:clamp(14px,2.5vw,36px);align-items:center;flex-wrap:wrap; }
+.tv-tk-item{ display:flex;align-items:baseline;gap:10px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.2);border-radius:14px;padding:4px 16px; }
+.tv-tk-lbl{ font-family:'Oswald',sans-serif;font-size:clamp(11px,1.2vw,16px);letter-spacing:1px;color:rgba(255,255,255,.75);text-transform:uppercase; }
+.tv-tk-dig{ font-family:'Oswald',sans-serif;font-weight:700;font-size:clamp(28px,4.4vw,64px);line-height:1.1;font-variant-numeric:tabular-nums; }
+.tv-tk-dig.tc-match{ color:#7affa0; }
+.tv-tk-dig.tc-trans{ color:#ffd27a; }
+.tv-tk-dig.tc-zero{ color:#ff6b60;animation:blink 1s ease-in-out infinite; }
+.tv-tk-dig.tc-idle{ color:rgba(255,255,255,.4); }
+.tv-tk-dig.tc-pause{ opacity:.55; }
 .tv-sub-ttl{ text-align:center; font-family:'Oswald',sans-serif; font-size:clamp(20px,3vw,40px); letter-spacing:1px; color:#ffd27a; padding:clamp(10px,2vh,18px) 0 4px; flex-shrink:0; }
 
 .tv-body{ flex:1; padding:0 clamp(16px,4vw,60px) 90px; overflow-y:auto; scrollbar-width:none; }
@@ -4310,22 +4465,12 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
     <button id="stab_classement" onclick="showSpectatorTab('classement')" style="padding:7px 16px;font-family:'Oswald',sans-serif;font-size:13px;letter-spacing:.5px;border:none;border-bottom:2px solid transparent;margin-bottom:-2px;background:none;color:var(--muted);cursor:pointer">🏆 CLASSEMENT</button>
   </div>
 
-  <!-- TIMER (admin/scorer) -->
-  <div class="timer-wrap" data-role="scorer">
-    <div>
-      <div class="timer-lbl" id="tmrLbl">⏱ MATCH</div>
-      <div class="timer-big tc-match" id="tmrDsp">00:00</div>
-    </div>
+  <!-- CHRONO partagé : visible par tous (spectateurs en lecture seule), commandes réservées à l'admin -->
+  <div class="timer-wrap" id="timerWrap">
+    <div class="timer-clocks" id="timerClocks"></div>
     <div class="timer-btns">
-      <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
-        <button class="btn btn-g btn-sm" onclick="startTimer('match')">▶ Match</button>
-        <button class="btn btn-ghost btn-sm" onclick="startTimer('trans')">⏸ Transition</button>
-        <button class="btn btn-ghost btn-xs" id="soundToggle" onclick="toggleSound()" title="Son on/off">🔊</button>
-      </div>
-      <div style="display:flex;gap:6px">
-        <button class="btn btn-ghost btn-xs" id="tmrP" onclick="pauseTimer()" style="display:none">⏸</button>
-        <button class="btn btn-ghost btn-xs" id="tmrR" onclick="resumeTimer()" style="display:none">▶ Reprendre</button>
-      </div>
+      <div class="timer-ctl" id="timerCtl"></div>
+      <button class="btn btn-ghost btn-xs" id="soundToggle" onclick="toggleSound()" title="Son on/off">🔊</button>
     </div>
   </div>
 
@@ -4573,6 +4718,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
   <div class="tv-hdr">
     <div class="tv-brand">🏓 Interclub</div>
     <div class="tv-phase-badge" id="tvPhaseBadge">—</div>
+    <div class="tv-timers" id="tvTimers" style="display:none"></div>
     <div class="tv-clock" id="tvClock">--:--:--</div>
   </div>
   <div class="tv-sub-ttl" id="tvSubTitle">⚽ Résultats en direct</div>
