@@ -3278,8 +3278,8 @@ window.updateMural = function(){
   el.innerHTML = st.map((s,i)=>{
     const gd = s.gf-s.ga;
     const isTop3 = i<3;
-    const bgColor = i===0?'linear-gradient(135deg,#1a1208,#2a2008)':i===1?'linear-gradient(135deg,#101520,#181e30)':i===2?'linear-gradient(135deg,#141008,#201808)':'var(--s1)';
-    const borderColor = i===0?'#d4a820':i===1?'#7090c0':i===2?'#a06030':'var(--bdr)';
+    const bgColor = i===0?'linear-gradient(135deg,#1a1208,#2a2008)':i===1?'linear-gradient(135deg,#101520,#181e30)':i===2?'linear-gradient(135deg,#141008,#201808)':'linear-gradient(135deg,#0d1a30,#132240)';
+    const borderColor = i===0?'#d4a820':i===1?'#7090c0':i===2?'#a06030':'rgba(255,255,255,.18)';
     return `<div style="background:${bgColor};border:2px solid ${borderColor};border-radius:12px;padding:16px 18px;display:flex;align-items:center;gap:14px">
       <div style="font-family:'Oswald',sans-serif;font-size:${isTop3?36:28}px;min-width:50px;text-align:center;color:${i===0?'#d4a820':i===1?'#7090c0':i===2?'#a06030':'rgba(255,255,255,.4)'}">${med[i]||i+1}</div>
       <div style="flex:1;min-width:0">
@@ -3288,9 +3288,9 @@ window.updateMural = function(){
         <div style="font-size:11px;color:rgba(255,255,255,.5);margin-top:3px">${s.played}J · ${s.w}V · ${s.d}N · ${s.l}D · BP:${s.gf} BC:${s.ga}</div>
       </div>
       <div style="text-align:right;flex-shrink:0">
-        <div style="font-family:'Oswald',sans-serif;font-size:${isTop3?36:28}px;color:var(--grn);line-height:1">${s.pts}</div>
+        <div style="font-family:'Oswald',sans-serif;font-size:${isTop3?36:28}px;color:#4ade80;line-height:1">${s.pts}</div>
         <div style="font-size:10px;color:rgba(255,255,255,.4);letter-spacing:1px">PTS</div>
-        <div style="font-size:12px;color:${gd>=0?'var(--grn)':'var(--red)'};font-weight:700;margin-top:2px">${gd>0?'+':''}${gd}</div>
+        <div style="font-size:12px;color:${gd>=0?'#4ade80':'#f87171'};font-weight:700;margin-top:2px">${gd>0?'+':''}${gd}</div>
       </div>
     </div>`;
   }).join('');
