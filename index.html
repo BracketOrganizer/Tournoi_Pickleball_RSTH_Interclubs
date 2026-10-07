@@ -96,7 +96,8 @@ const ST = {
     lunchDuration:60,  // durée déjeuner (min)
     start:'09:00',
     lunchStart:'12:30',
-    bal:'level'    // 'level' | 'random'
+    bal:'level',   // 'level' | 'random'
+    hallMode:'mix' // 'same' | 'swap' | 'mix' : salle matin/après-midi
   },
   sub:{targetId:null,selId:null}
 };
@@ -798,26 +799,83 @@ window.toggleRules = function(){
 // PAGE 1 — CONFIG — vague unique, nb vagues auto
 // ══════════════════════════════════════════════════════════
 
-// Calcule la répartition des groupes à partir du nb de salles et de terrains par salle.
-// Chaque salle accueille courtsPerHall*2 équipes. On répartit N équipes équitablement.
-function _calcGroups(n, numHalls, courtsPerHall){
-  const hall1courts = Math.max(1, +courtsPerHall);
-  const hall2courts = Math.max(1, +(arguments[3]||courtsPerHall)); // terrains salle 2 si différents
-  // capacité par salle = terrains × 2 équipes
-  const caps = [];
-  for(let g=0;g<numHalls;g++) caps.push(g===1&&arguments[3] ? hall2courts*2 : hall1courts*2);
-  const totalCap = caps.reduce((a,b)=>a+b,0);
-  // Répartir N équipes proportionnellement aux capacités
-  const sizes=[], courts=[];
-  let remaining=n;
-  caps.forEach((cap,gi)=>{
-    if(gi===numHalls-1){ sizes.push(remaining); }
-    else { sizes.push(Math.round(n*cap/totalCap)); remaining-=sizes[gi]; }
-    courts.push(Math.floor(sizes[gi]/2));
-  });
-  const totalCourts = courts.reduce((a,b)=>a+b,0);
-  const oddGroups = sizes.filter(s=>s%2===1).length;
-  return { numGroups:numHalls, sizes, courtsPerGroup:courts, totalCourts, oddGroups };
+// ── Répartition des équipes entre salles ─────────────────────────────
+// Objectif : que toutes les salles finissent leur session (matin / après-midi)
+// presque en même temps, même si le nombre de terrains diffère d'une salle à l'autre.
+// => le nombre d'équipes de chaque salle est proportionnel à ses terrains.
+function _courtsArr(numHalls,t1,t2){
+  return [t1,t2,t1,t1].slice(0,Math.max(1,numHalls||1)).map(c=>Math.max(1,+c||1));
+}
+// Nb de créneaux horaires nécessaires à une salle de `s` équipes, `c` terrains, `K` tours
+function _effSlots(s,c,K){
+  if(s<2) return 0;
+  const m=Math.floor(s/2);
+  return m<=c ? K : Math.ceil(m*K/c-1e-9);
+}
+// Coût d'une répartition : 1) fin de session la plus tôt, 2) salles qui finissent ensemble,
+// 3) terrains remplis équitablement, 4) peu d'équipes exemptes
+function _hallsCost(sizes,courts,K){
+  const eff=sizes.map((s,i)=> s<2 ? 0 : Math.max(K, Math.floor(s/2)*K/courts[i]));
+  const raw=sizes.map((s,i)=> Math.floor(s/2)*K/courts[i]);
+  const mx=Math.max(...eff), mn=Math.min(...eff);
+  const rmx=Math.max(...raw), rmn=Math.min(...raw);
+  const odd=sizes.filter(s=>s%2===1).length;
+  return Math.ceil(mx-1e-9)*1000 + (mx-mn)*100 + (rmx-rmn)*10 + odd*5;
+}
+// Meilleure répartition de N équipes ; Ks = liste des nb de tours à optimiser ensemble
+function _bestSizes(N,courts,Ks){
+  const H=courts.length;
+  if(H===1) return [N];
+  const totC=courts.reduce((a,b)=>a+b,0);
+  const prop=courts.map(c=>Math.round(N*c/totC));
+  const W=8;
+  let best=null, bc=Infinity;
+  const cur=new Array(H).fill(0);
+  (function rec(i,rem){
+    if(i===H-1){
+      if(rem<0||rem>N||Math.abs(rem-prop[i])>W) return;
+      cur[i]=rem;
+      const c=Ks.reduce((a,K)=>a+_hallsCost(cur,courts,K),0);
+      if(c<bc-1e-9){ bc=c; best=cur.slice(); }
+      return;
+    }
+    for(let s=Math.max(0,prop[i]-W); s<=Math.min(rem,prop[i]+W); s++){ cur[i]=s; rec(i+1,rem-s); }
+  })(0,N);
+  if(!best){
+    best=[]; let r=N;
+    for(let i=0;i<H;i++){ const s=i===H-1?r:Math.round(N/H); best.push(s); r-=s; }
+  }
+  return best;
+}
+// Effectifs des salles le matin (am) et l'après-midi (pm)
+function _planHallSizes(N,courts,Kam,Kpm,mode,lunch){
+  if(courts.length===1) return {am:[N], pm:[N]};
+  if(!lunch || mode==='same'){ const s=_bestSizes(N,courts,[Kam,Kpm]); return {am:s, pm:s.slice()}; }
+  return {am:_bestSizes(N,courts,[Kam]), pm:_bestSizes(N,courts,[Kpm])};
+}
+// Mode « changer de salle à midi » : f[i][j] = équipes de la salle i (matin) qui vont en salle j (après-midi),
+// en maximisant le nombre d'équipes qui changent de salle.
+function _swapFlows(am,pm){
+  const H=am.length, rowR=am.slice(), colR=pm.slice();
+  const f=Array.from({length:H},()=>new Array(H).fill(0));
+  while(true){
+    let best=null, bv=0;
+    for(let i=0;i<H;i++) for(let j=0;j<H;j++){
+      if(i===j) continue;
+      const v=Math.min(rowR[i],colR[j]);
+      if(v>bv){ bv=v; best=[i,j]; }
+    }
+    if(!best) break;
+    f[best[0]][best[1]]+=bv; rowR[best[0]]-=bv; colR[best[1]]-=bv;
+  }
+  for(let i=0;i<H;i++){ f[i][i]+=rowR[i]; rowR[i]=0; }
+  return f;
+}
+function _calcGroups(n, numHalls, t1, t2, K){
+  const courts=_courtsArr(numHalls,t1,t2);
+  const sizes=_bestSizes(n,courts,[K||4]);
+  const cp=sizes.map(s=>Math.floor(s/2));
+  return { numGroups:courts.length, sizes, courtsPerGroup:cp, totalCourts:cp.reduce((a,b)=>a+b,0), oddGroups:sizes.filter(s=>s%2===1).length };
 }
 
 function _calcAutoWaves(n, numHalls, t1, t2, targetMatches){
@@ -854,10 +912,10 @@ function getCfg(){
     start:          document.getElementById('cfg_start')?.value||'09:00',
     lunchStart:     document.getElementById('cfg_lunchstart')?.value||'12:30',
     bal:            document.getElementById('cfg_bal')?.value||'level',
-    hallMode:       document.getElementById('cfg_hall_mode')?.value||'balanced',
     matchesMorning:   morning,
     matchesAfternoon: afternoon,
     halls, t1, t2,
+    hallMode: document.getElementById('cfg_hallmode')?.value || 'mix',
     targetMatchesPerTeam,
   };
 }
@@ -873,7 +931,6 @@ function syncCfgForm(){
   setV('cfg_start', c.start||'09:00');
   setV('cfg_lunchstart', c.lunchStart||'12:30');
   setV('cfg_bal', c.bal||'level');
-  setV('cfg_hall_mode', c.hallMode||'balanced');
   setC('cfg_lunch', c.lunchBreak!==false);
   const t1 = c.t1||8, t2 = c.t2||c.t1||8, halls = c.halls||1;
   setV('cfg_halls', halls);
@@ -882,6 +939,7 @@ function syncCfgForm(){
   const t2row = document.getElementById('cfg_t2_row');
   if(t2row) t2row.style.display = halls>=2 ? '' : 'none';
   setV('cfg_matches_per_team', c.targetMatchesPerTeam||5);
+  setV('cfg_hallmode', c.hallMode||'mix');
   // Mode manuel si cfg a des comptes différents du calcul auto
   const hasMorning   = c.matchesMorning   != null;
   const auto = _calcAutoWaves(c.n||32, halls, t1, t2, c.targetMatchesPerTeam||5);
@@ -918,6 +976,8 @@ window.onCfgChange = function(){
   const halls = +(document.getElementById('cfg_halls')?.value||1);
   const t2rowEl = document.getElementById('cfg_t2_row');
   if(t2rowEl) t2rowEl.style.display = halls>=2 ? '' : 'none';
+  const hmRow = document.getElementById('cfg_hallmode_row');
+  if(hmRow) hmRow.style.display = (halls>=2 && lunchCk) ? '' : 'none';
 
   // Calcul vagues / groupes
   const n  = +(document.getElementById('cfg_n')?.value||32);
@@ -942,43 +1002,66 @@ window.onCfgChange = function(){
   const mptRow = document.getElementById('cfg_mpt_row');
   if(mptRow) mptRow.style.display = wMode==='auto' ? '' : 'none';
 
-  // Info groupes / exempts
-  const infoEl = document.getElementById('wave_auto_info');
-  if(infoEl){
-    const g = _calcGroups(n, halls, t1, t2);
-    const totalWaves = morning + afternoon;
-    infoEl.style.display = '';
-    infoEl.className = g.oddGroups>0 ? 'info info-y' : 'info info-b';
-    const sizesStr = g.sizes.join('+');
-    // Détection sous-vagues : matchs par salle vs terrains par salle
-    const courtsArr=[t1,t2,t1,t1].slice(0,halls);
-    const subWavesPerHall = g.sizes.map((sz,gi)=>Math.ceil(Math.floor(sz/2)/(courtsArr[gi]||1)));
-    const maxSubWaves = Math.max(...subWavesPerHall);
-    const totalSlots = totalWaves * maxSubWaves;
-    infoEl.innerHTML = (wMode==='auto'
-      ? `🤖 <strong>${totalWaves} tours</strong> (${morning} matin + ${afternoon} après-midi) — cible <strong>${targetMPT} matchs/équipe</strong>`
-      : `✏️ Mode manuel : <strong>${morning} tours matin</strong> + <strong>${afternoon} tours après-midi</strong> = ${totalWaves} tours`)
-      + `<br>🏟️ <strong>${g.numGroups} salle${g.numGroups>1?'s':''}</strong> de ${sizesStr} équipes · ${courtsArr.join('+')} terrains (${g.courtsPerGroup.join('+')} matchs simultanés)`
-      + (g.oddGroups>0
-          ? `<br>⚠️ <strong>${g.oddGroups} équipe${g.oddGroups>1?'s':''} exempte${g.oddGroups>1?'s':''} par tour</strong> (salle${g.oddGroups>1?'s':''} à effectif impair) — l'exemption tourne équitablement et compte 2 pts / 0-0.`
-          : `<br>✅ Aucune équipe exempte — tout le monde joue à chaque tour.`)
-      + (maxSubWaves>1
-          ? `<br>🔀 Chaque tour est divisé en <strong>${maxSubWaves} sous-vagues</strong> (plus de matchs que de terrains dans au moins une salle) → environ <strong>${totalSlots} créneaux horaires</strong> au total.`
-          : '')
-      + (lunchCk
-          ? `<br>🔁 Les groupes sont reformés à la pause déjeuner (matin ≠ après-midi).`
-          : `<br>🔒 Les équipes restent dans la même salle toute la journée (pas de coupure).`);
-  }
-
-  // Preview horaires
+  // Répartition des équipes par salle (proportionnelle aux terrains) + nb de créneaux
   const mt        = +(document.getElementById('cfg_mt')?.value||15);
   const tt        = +(document.getElementById('cfg_tt')?.value||3);
   const start     = document.getElementById('cfg_start')?.value||'09:00';
   const lunchStart= document.getElementById('cfg_lunchstart')?.value||'12:30';
   const lunchDur  = +(document.getElementById('cfg_lunchdur')?.value||60);
-  const morningEnd  = addMinutes(start,  morning*(mt+tt)-tt);
-  const afterStart  = lunchCk ? addMinutes(lunchStart,lunchDur) : morningEnd;
-  const afterEnd    = addMinutes(afterStart, afternoon*(mt+tt)-tt);
+  const courtsArr = _courtsArr(halls,t1,t2);
+  const hallMode  = document.getElementById('cfg_hallmode')?.value || 'mix';
+  const plan  = _planHallSizes(n, courtsArr, morning, afternoon, hallMode, lunchCk);
+  const slAM  = plan.am.map((s,i)=>_effSlots(s,courtsArr[i],morning));
+  const slPM  = plan.pm.map((s,i)=>_effSlots(s,courtsArr[i],afternoon));
+  const maxSlAM = Math.max(1,...slAM), maxSlPM = Math.max(1,...slPM);
+
+  // Info groupes / exempts
+  const infoEl = document.getElementById('wave_auto_info');
+  if(infoEl){
+    const totalWaves = morning + afternoon;
+    const odd = Math.max(plan.am.filter(s=>s%2===1).length, plan.pm.filter(s=>s%2===1).length);
+    infoEl.style.display = '';
+    infoEl.className = odd>0 ? 'info info-y' : 'info info-b';
+    const hallsTxt=(sizes,sl)=>sizes.map((s,i)=>`Salle ${i+1} : <strong>${s}</strong> équipes · ${courtsArr[i]} terrains · ${sl[i]} créneaux`).join(' &nbsp;|&nbsp; ');
+    let html = (wMode==='auto'
+      ? `🤖 <strong>${totalWaves} tours</strong> (${morning} matin + ${afternoon} après-midi) — cible <strong>${targetMPT} matchs/équipe</strong>`
+      : `✏️ Mode manuel : <strong>${morning} tours matin</strong> + <strong>${afternoon} tours après-midi</strong> = ${totalWaves} tours`);
+    if(halls>1){
+      html += `<br>☀️ Matin — ${hallsTxt(plan.am,slAM)}<br>🌤️ Après-midi — ${hallsTxt(plan.pm,slPM)}`;
+      const gap = Math.max(Math.max(...slAM)-Math.min(...slAM), Math.max(...slPM)-Math.min(...slPM));
+      html += gap===0
+        ? `<br>✅ Les salles terminent <strong>en même temps</strong> (matin et après-midi).`
+        : `<br>⚠️ Les salles ne terminent pas exactement ensemble (écart max : ${gap} créneau${gap>1?'x':''} ≈ ${gap*(mt+tt)} min). Ajustez le nombre d'équipes ou de terrains.`;
+    } else {
+      html += `<br>🏟️ <strong>1 salle</strong> · ${t1} terrains (${Math.floor(n/2)} matchs par tour)`;
+    }
+    html += odd>0
+      ? `<br>⚠️ <strong>Une équipe exempte par tour</strong> dans les salles à effectif impair — l'exemption tourne équitablement et compte 2 pts / 0-0.`
+      : `<br>✅ Aucune équipe exempte — tout le monde joue à chaque tour.`;
+    if(maxSlAM>morning || maxSlPM>afternoon){
+      html += `<br>🔀 Certains tours sont divisés en sous-vagues (plus de matchs que de terrains) → <strong>${maxSlAM}</strong> créneaux le matin, <strong>${maxSlPM}</strong> l'après-midi.`;
+    }
+    if(halls>1){
+      if(!lunchCk || hallMode==='same'){
+        html += `<br>🔒 Chaque équipe reste dans la même salle toute la journée.`;
+      } else if(hallMode==='swap'){
+        const f=_swapFlows(plan.am,plan.pm);
+        const stay=f.reduce((s,row,i)=>s+row[i],0);
+        html += `<br>🔀 À midi, <strong>${n-stay} équipe${n-stay>1?'s':''} changent de salle</strong>${stay>0?` et ${stay} restent dans la même (effectifs des salles différents)`:''}.`;
+      } else {
+        html += `<br>🔁 À midi, les équipes sont retirées au sort dans les salles : certaines restent, d'autres changent.`;
+      }
+      html += ` Aucune équipe ne change de salle au cours d'une même session.`;
+    } else if(lunchCk){
+      html += `<br>🔁 Les groupes sont reformés à la pause déjeuner (matin ≠ après-midi).`;
+    }
+    infoEl.innerHTML = html;
+  }
+
+  // Preview horaires
+  const morningEnd  = addMinutes(start,  maxSlAM*(mt+tt)-tt);
+  const afterStart  = lunchCk ? addMinutes(lunchStart,lunchDur) : addMinutes(start, maxSlAM*(mt+tt));
+  const afterEnd    = addMinutes(afterStart, maxSlPM*(mt+tt)-tt);
   const el = document.getElementById('cfgPreview');
   if(el){
     el.className='info info-g';
@@ -1028,6 +1111,23 @@ function makeRoundMatches(active, maxCourts, oppCount){
   return bestMatches||[];
 }
 
+// Découpe la liste des matchs d'une salle en créneaux de `courts` matchs max,
+// sans jamais mettre la même équipe deux fois dans un même créneau.
+function packSlots(allMatches,courts){
+  const remaining=[...allMatches], slots=[];
+  while(remaining.length){
+    const used=new Set(), slot=[], firstTour=remaining[0].tourIdx;
+    for(let i=0;i<remaining.length && slot.length<courts;){
+      const m=remaining[i];
+      if(m.tourIdx>firstTour+1) break;
+      if(used.has(m.tA)||used.has(m.tB)){ i++; continue; }
+      slot.push(m); used.add(m.tA); used.add(m.tB); remaining.splice(i,1);
+    }
+    slots.push(slot);
+  }
+  return slots;
+}
+
 function buildSchedule(){
   const cfg=getCfg();
   if(ST.teams.length<2){ alert('Il faut au moins 2 équipes.'); return false; }
@@ -1041,79 +1141,36 @@ function buildSchedule(){
   const courtsArr = [cfg.t1||8, cfg.t2||cfg.t1||8, cfg.t1||8, cfg.t1||8].slice(0,halls);
   const numGroups = _calcGroups(N, halls, cfg.t1||8, cfg.t2||cfg.t1||8).numGroups;
 
-  // Répartition optimisée : on tient compte du nombre de terrains de chaque salle.
-  // Objectif prioritaire : le même nombre de créneaux dans les deux salles.
-  function balancedSizes(nTeams, courts){
-    if(courts.length<=1) return [nTeams];
-    if(courts.length===2){
-      let best=null;
-      for(let s1=2;s1<=nTeams-2;s1++){
-        const s2=nTeams-s1;
-        const am1=Math.ceil((Math.floor(s1/2)*Math.max(1,cfg.matchesMorning))/courts[0]);
-        const am2=Math.ceil((Math.floor(s2/2)*Math.max(1,cfg.matchesMorning))/courts[1]);
-        const pm1=Math.ceil((Math.floor(s1/2)*Math.max(1,cfg.matchesAfternoon))/courts[0]);
-        const pm2=Math.ceil((Math.floor(s2/2)*Math.max(1,cfg.matchesAfternoon))/courts[1]);
-        const maxSlots=Math.max(am1,am2,pm1,pm2);
-        const slotDiff=Math.abs(am1-am2)+Math.abs(pm1-pm2);
-        const ratio=Math.abs(s1/nTeams-courts[0]/(courts[0]+courts[1]));
-        const score=[maxSlots,slotDiff,ratio,Math.abs(s1-s2)];
-        const better=!best || score[0]<best.score[0] || (score[0]===best.score[0] && (score[1]<best.score[1] || (score[1]===best.score[1] && (score[2]<best.score[2] || (score[2]===best.score[2] && score[3]<best.score[3])))));
-        if(better) best={sizes:[s1,s2],score};
-      }
-      return best?best.sizes:[Math.round(nTeams*courts[0]/(courts[0]+courts[1])),nTeams-Math.round(nTeams*courts[0]/(courts[0]+courts[1]))];
-    }
-    const totalCourts=courts.reduce((a,b)=>a+b,0);
-    const sizes=courts.map(c=>Math.max(2,Math.round(nTeams*c/totalCourts)));
-    let delta=nTeams-sizes.reduce((a,b)=>a+b,0);
-    while(delta!==0){
-      const gi=sizes.reduce((best,_,i)=>{
-        if(delta>0) return (sizes[i]/courts[i])<(sizes[best]/courts[best])?i:best;
-        return (sizes[i]/courts[i])>(sizes[best]/courts[best])?i:best;
-      },0);
-      if(delta>0){ sizes[gi]++; delta--; } else if(sizes[gi]>2){ sizes[gi]--; delta++; } else break;
-    }
-    return sizes;
+  // Effectifs de chaque salle, proportionnels à ses terrains → toutes les salles
+  // finissent à peu près en même temps (matin et après-midi).
+  const lunch    = !!cfg.lunchBreak;
+  const hallMode = cfg.hallMode || 'mix';
+  const plan = _planHallSizes(N, courtsArr, cfg.matchesMorning, cfg.matchesAfternoon, hallMode, lunch);
+
+  function splitBySizes(ids,sizes){
+    const sh=shuffle(ids), out=[]; let i=0;
+    sizes.forEach(s=>{ out.push(sh.slice(i,i+s)); i+=s; });
+    return out;
   }
 
-  function makeGroups(ids, sizesOverride=null){
-    const shuffled=shuffle(ids);
-    const sizes=sizesOverride||balancedSizes(ids.length,courtsArr);
-    const groups=[]; let idx=0;
-    sizes.forEach(size=>{ groups.push(shuffled.slice(idx,idx+size)); idx+=size; });
-    return groups;
-  }
-
-  const groupSizes=balancedSizes(N,courtsArr);
-  // Matin : répartition optimisée selon les capacités réelles des salles.
-  const groupsMorning=makeGroups(allIds,groupSizes);
-  // Après-midi : soit mêmes salles, soit mélange contrôlé, soit changement marqué.
-  let groupsAfternoon=groupsMorning;
-  if(cfg.lunchBreak && halls>1 && cfg.hallMode!=='same'){
-    const shuffled=shuffle(allIds);
-    if(cfg.hallMode==='switch'){
-      // On repart d'un mélange complet : la majorité des équipes changent de salle.
-      groupsAfternoon=makeGroups(shuffled,groupSizes);
-    } else {
-      // Mode optimisé : conserve une partie des équipes dans leur salle et en
-      // fait changer d'autres, tout en gardant exactement les tailles optimales.
-      const target=groupSizes;
-      const out=[...Array(halls)].map(()=>[]);
-      const moveRatio=.35;
-      const pool=shuffle(allIds);
-      const selected=new Set(pool.slice(0,Math.floor(N*moveRatio)));
-      const stay=groupsMorning.map(g=>g.filter(id=>!selected.has(id)));
-      selected.forEach(id=>{
-        const candidates=out.map((_,i)=>i).filter(i=>stay[i].length<target[i]);
-        const from=groupsMorning.findIndex(g=>g.includes(id));
-        const choices=candidates.filter(i=>i!==from);
-        const dest=(choices.length?choices:candidates)[Math.floor(Math.random()*(choices.length?choices.length:candidates.length))];
-        if(dest!=null) out[dest].push(id);
-      });
-      for(let i=0;i<halls;i++) out[i]=stay[i].concat(out[i]);
-      // Sécurité : si le remplissage contrôlé n'a pas exactement les bonnes tailles,
-      // on reconstruit à partir d'un mélange, ce qui reste équilibré.
-      groupsAfternoon=out.every((g,i)=>g.length===target[i]) ? out : makeGroups(allIds,target);
-    }
+  // Groupes fixes pour chaque session : une équipe ne change JAMAIS de salle au sein
+  // du matin ou de l'après-midi. Entre les deux :
+  //  - 'same' : même salle toute la journée
+  //  - 'swap' : on change de salle à midi (autant d'équipes que possible)
+  //  - 'mix'  : nouveau tirage au sort à midi (certaines restent, d'autres changent)
+  const groupsMorning = splitBySizes(allIds, plan.am);
+  let groupsAfternoon;
+  if(!lunch || hallMode==='same'){
+    groupsAfternoon = groupsMorning.map(g=>[...g]);
+  } else if(hallMode==='swap'){
+    const f=_swapFlows(plan.am,plan.pm);
+    groupsAfternoon = plan.pm.map(()=>[]);
+    groupsMorning.forEach((g,i)=>{
+      const sh=shuffle(g); let k=0;
+      for(let j=0;j<halls;j++) for(let c=0;c<f[i][j];c++) groupsAfternoon[j].push(sh[k++]);
+    });
+  } else {
+    groupsAfternoon = splitBySizes(allIds, plan.pm);
   }
 
   // Sélectionne au plus 1 équipe au repos par groupe (si effectif impair),
@@ -1161,7 +1218,7 @@ function buildSchedule(){
       }
       // Découper en créneaux pleins de `courts` matchs
       const slots=[];
-      for(let i=0;i<allMatches.length;i+=courts) slots.push(allMatches.slice(i,i+courts));
+      slots.push(...packSlots(allMatches,courts));
       if(slots.length===0) slots.push([]);
       return { slots, byesByTour, label: numGroups>1?`Salle ${gi+1}`:'', teams:grp, courts };
     });
@@ -1359,7 +1416,7 @@ function renderFichesPanel(){
       <div style="font-weight:700;font-family:'Oswald',sans-serif;font-size:14px;color:var(--ink)">${t.name}</div>
       <div style="font-size:11px;color:var(--muted)">${t.p1} · ${t.p2}</div>
       ${nextHtml}
-      <button class="btn btn-ghost btn-xs" onclick="event.stopPropagation();printTeamScheduleSingle('${t.id}')" style="margin-top:7px">🖨 Imprimer le programme complet</button>
+      <div style="font-size:10px;color:var(--dim);margin-top:4px">🖨 Cliquer pour imprimer la fiche</div>
     </div>`;
   }).join('');
 }
@@ -1426,7 +1483,7 @@ function renderTeamsSpecPage(){
         </tr></thead>
         <tbody>${rowsHtml}</tbody>
       </table>`:'<div style="color:var(--muted);font-size:11px">Planning non généré</div>'}
-      <div style="text-align:right;margin-top:8px"><button class="btn btn-ghost btn-xs" onclick="event.stopPropagation();printTeamScheduleSingle('${t.id}')">🖨 Imprimer le programme complet</button></div>
+      <div style="font-size:10px;color:var(--dim);margin-top:8px;text-align:right">🖨 Cliquer pour imprimer</div>
     </div>`;
   }).join('');
 }
@@ -3112,46 +3169,133 @@ window.printTeamSchedule = function(tid){
   </div>`;
 };
 
-// Toutes les fiches dans une seule fenêtre — plusieurs par page A4
+// Programme complet d'une équipe (matin + après-midi), sans scores
+function _teamProgramRows(tid){
+  const rows=[];
+  ST.schedule.forEach(rd=>{
+    rd.halls.forEach(h=>{
+      if((h.byes||[]).includes(tid)) rows.push({session:rd.session,time:rd.roundTime||'',type:'bye',hall:h.label||'',court:'',opp:null});
+      h.matches.forEach((m,mi)=>{
+        if(m.tA===tid||m.tB===tid) rows.push({session:rd.session,time:rd.roundTime||'',type:'match',hall:h.label||'',court:'T'+(mi+1),opp:m.tA===tid?m.tB:m.tA});
+      });
+    });
+  });
+  return rows;
+}
+
+// Petite fiche « programme de la journée » à découper et distribuer aux équipes
+function _teamSlipHtml(tid){
+  const team=tObj(tid); if(!team) return '';
+  const cfg=ST.cfg||{};
+  const multi=(cfg.halls||1)>1;
+  const rows=_teamProgramRows(tid);
+  const am=rows.filter(r=>r.session==='morning');
+  const pm=rows.filter(r=>r.session!=='morning');
+  const hallsOf=a=>[...new Set(a.map(r=>r.hall).filter(Boolean))].join(' puis ');
+  const rowHtml=r=>{
+    if(r.type==='bye') return `<tr class="bye"><td class="t">${r.time}</td><td class="c">—</td><td>🟡 Exempt (repos)</td></tr>`;
+    const o=tObj(r.opp);
+    const club=o&&o.club&&o.club!=='—'?` <span class="cl">${o.club}</span>`:'';
+    return `<tr><td class="t">${r.time}</td><td class="c">${r.hall?r.hall+' · ':''}${r.court}</td><td><strong>${o?o.name:r.opp}</strong>${club}</td></tr>`;
+  };
+  const secHdr=(ico,lbl,a)=>{ const h=multi?hallsOf(a):''; return `<tr class="sec"><td colspan="3">${ico} ${lbl}${h?' — '+h:''}</td></tr>`; };
+  let body=secHdr('☀️','MATIN',am)+am.map(rowHtml).join('');
+  if(cfg.lunchBreak!==false){
+    const ls=cfg.lunchStart||'12:30';
+    body+=`<tr class="lunch"><td colspan="3">🍽️ Déjeuner ${ls} → ${addMinutes(ls,cfg.lunchDuration||60)}</td></tr>`;
+  }
+  body+=secHdr('🌤️','APRÈS-MIDI',pm)+pm.map(rowHtml).join('');
+  const clubBadge=team.club&&team.club!=='—'?`<span class="badge">${team.club}</span>`:'';
+  return `<div class="slip">
+    <div class="slip-hdr"><span>🏓 ${team.name} ${clubBadge}</span></div>
+    <div class="slip-pl">👤 ${team.p1} &amp; ${team.p2}</div>
+    <table><thead><tr><th>Heure</th><th>${multi?'Salle · Terrain':'Terrain'}</th><th>Adversaire</th></tr></thead><tbody>${body}</tbody></table>
+    <div class="slip-ft">Matchs de ${cfg.mt||15} min</div>
+  </div>`;
+}
+
+// Toutes les fiches dans une seule fenêtre : 2, 3 ou 4 équipes par feuille A4 (à découper), ou ancien format dense avec scores
 window.printAllTeamSchedules = function(){
   if(!ST.schedule.length){ alert('Aucun planning généré.'); return; }
+  _ensureRoundTimes();
   const limit = ST.cfg?.n || ST.teams.length;
-  const fiches=ST.teams.slice(0,limit).map(t=>printTeamSchedule(t.id)).filter(Boolean);
-  if(!fiches.length){ alert('Aucune fiche à imprimer.'); return; }
-  let perPage=prompt('Combien de programmes complets par feuille A4 ?\n\n2 = très lisible\n3 = compromis recommandé\n4 = format compact', '3');
-  perPage=parseInt(perPage,10);
-  if(![2,3,4].includes(perPage)) perPage=3;
-  const rows=perPage===4?2:perPage;
-const cols=perPage===4?2:1;
-  const win=window.open('','_allfiches','width=1000,height=750');
-  win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Programmes équipes</title>
+  const ids=ST.teams.slice(0,limit).map(t=>t.id);
+  const slips=ids.map(_teamSlipHtml).filter(Boolean);
+  const dense=ids.map(id=>printTeamSchedule(id)).filter(Boolean);
+  if(!slips.length){ alert('Aucune fiche à imprimer.'); return; }
+  const pages=per=>{
+    let o='';
+    for(let i=0;i<slips.length;i+=per) o+=`<div class="sheet per${per}">${slips.slice(i,i+per).join('')}</div>`;
+    return o;
+  };
+  const win=window.open('','_allfiches','width=1000,height=800');
+  win.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Fiches équipes</title>
   <style>
     *{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:Arial,sans-serif;font-size:8px;background:#fff;color:#111}
-    .page{width:100%;height:100%;display:grid;grid-template-columns:repeat(${cols},1fr);grid-template-rows:repeat(${rows},1fr);gap:3mm;padding:0}
-    .fiche{border:1px dashed #777;border-radius:2px;padding:3mm;break-inside:avoid;page-break-inside:avoid;overflow:hidden}
-    .fiche-hdr{font-size:${perPage===4?9:10}px;font-weight:700;margin-bottom:2px;padding-bottom:2px;border-bottom:1.5px solid #1a2540;display:flex;justify-content:space-between}
-    .fiche-joueurs{font-size:${perPage===4?7:8}px;color:#555;margin-bottom:2px}
-    table{width:100%;border-collapse:collapse;font-size:${perPage===4?7:8}px}
-    th{background:#1a2540;color:#fff;padding:2px 3px;text-align:left;font-size:${perPage===4?7:8}px}
-    td{padding:1.5px 3px;border-bottom:1px solid #eee;vertical-align:middle}
-    .fiche-bilan{margin-top:2px;font-size:${perPage===4?8:9}px;font-weight:700;color:#1a2540;text-align:right}
-    .noprint{padding:8px;background:#f0f4fa;border-bottom:1px solid #ccc}
+    body{font-family:Arial,sans-serif;background:#dde3ee;color:#111}
+    .noprint{padding:8px 12px;background:#f0f4fa;border-bottom:1px solid #ccc;display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:13px;position:sticky;top:0;z-index:5}
+    .noprint select,.noprint button{font-size:13px;padding:5px 10px}
+    .view{display:none}.view.on{display:block}
+    .sheet{width:210mm;height:296mm;margin:10px auto;background:#fff;padding:5mm;display:grid;box-shadow:0 0 6px #0005;page-break-after:always;break-after:page;overflow:hidden}
+    .sheet.per2{grid-template-columns:1fr;grid-template-rows:1fr 1fr}
+    .sheet.per3{grid-template-columns:1fr;grid-template-rows:repeat(3,1fr)}
+    .sheet.per4{grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr}
+    .slip{border:1.5px dashed #555;padding:4mm 5mm;overflow:hidden;font-size:11px}
+    .per2 .slip{font-size:14px;padding:6mm 10mm}
+    .per3 .slip{font-size:12px;padding:4mm 8mm}
+    .per4 .slip{font-size:10.5px}
+    .slip-hdr{font-size:1.35em;font-weight:700;padding-bottom:3px;border-bottom:2px solid #1a2540;margin-bottom:3px}
+    .badge{background:#e8f0ff;color:#1560c0;border-radius:4px;padding:1px 6px;font-size:.6em;font-weight:700;vertical-align:middle}
+    .slip-pl{color:#444;margin-bottom:5px;font-size:.95em}
+    .slip table{width:100%;border-collapse:collapse}
+    .slip th{background:#1a2540;color:#fff;text-align:left;padding:2px 6px;font-size:.85em}
+    .slip td{padding:2.5px 6px;border-bottom:1px solid #ddd;vertical-align:middle}
+    .slip td.t{font-weight:700;width:14%;white-space:nowrap}
+    .slip td.c{color:#7040b0;font-weight:700;white-space:nowrap;width:30%}
+    .slip .cl{color:#888;font-size:.8em}
+    .slip tr.sec td{background:#e6ebf5;font-weight:700;color:#1a2540;padding:3px 6px}
+    .slip tr.lunch td{text-align:center;font-style:italic;color:#555;background:#f6f6f6}
+    .slip tr.bye td{background:#fffbe8;color:#8a6200}
+    .slip-ft{margin-top:4px;font-size:.8em;color:#777;text-align:right}
+    .grid{display:none;grid-template-columns:1fr 1fr;gap:4px;padding:4mm;background:#fff}
+    .grid.on{display:grid}
+    .fiche{border:1px solid #bbb;border-radius:2px;padding:4px 5px;break-inside:avoid;font-size:9px}
+    .fiche-hdr{font-size:10px;font-weight:700;margin-bottom:2px;padding-bottom:2px;border-bottom:1.5px solid #1a2540;display:flex;justify-content:space-between}
+    .fiche-joueurs{font-size:8px;color:#555;margin-bottom:2px}
+    .grid table{width:100%;border-collapse:collapse;font-size:8px}
+    .grid th{background:#1a2540;color:#fff;padding:2px 4px;text-align:left;font-size:8px}
+    .grid td{padding:1.5px 4px;border-bottom:1px solid #eee;vertical-align:middle}
+    .fiche-bilan{margin-top:2px;font-size:9px;font-weight:700;color:#1a2540;text-align:right}
     @media print{
-      @page{size:A4 portrait;margin:5mm}
-      html,body{width:100%;height:100%;-webkit-print-color-adjust:exact;print-color-adjust:exact}
-      body{margin:0}
+      @page{size:A4 portrait;margin:0}
+      html{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      body{background:#fff}
       .noprint{display:none!important}
-      .page{height:calc(100vh - 10mm);gap:2.5mm}
-      .fiche{break-inside:avoid;page-break-inside:avoid}
-      th{-webkit-print-color-adjust:exact;print-color-adjust:exact;background:#1a2540!important;color:#fff!important}
-      tr{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      .sheet{margin:0;box-shadow:none}
+      .sheet:last-child{page-break-after:auto;break-after:auto}
+      .slip,.fiche{break-inside:avoid;page-break-inside:avoid}
+      th,tr,td{-webkit-print-color-adjust:exact;print-color-adjust:exact}
     }
   </style></head><body>
-  <div class="noprint"><strong>🏓 ${fiches.length} programmes</strong> · ${perPage} fiches par A4 · <button onclick="window.print()">🖨 Imprimer</button> <button onclick="window.close()">Fermer</button></div>
-  <div class="page">${fiches.map((f,i)=>f).join('')}</div>
+  <div class="noprint">
+    <strong>🏓 Fiches équipes — ${slips.length} équipes</strong>
+    <label>Format :
+      <select onchange="document.querySelectorAll('.view').forEach(function(e){e.classList.toggle('on',e.id==='v'+this.value)}.bind(this))">
+        <option value="2">2 équipes par feuille A4</option>
+        <option value="3">3 équipes par feuille A4</option>
+        <option value="4" selected>4 équipes par feuille A4</option>
+        <option value="d">Ancien format dense (avec scores)</option>
+      </select>
+    </label>
+    <button onclick="window.print()" style="background:#1a7a3a;color:#fff;border:none;border-radius:6px;cursor:pointer">🖨 Imprimer</button>
+    <span style="font-size:11px;color:#666">Programme complet matin + après-midi · à découper selon les pointillés · désactivez les en-têtes/pieds de page dans les options d'impression</span>
+  </div>
+  <div class="view" id="v2">${pages(2)}</div>
+  <div class="view" id="v3">${pages(3)}</div>
+  <div class="view on" id="v4">${pages(4)}</div>
+  <div class="view grid" id="vd">${dense.join('')}</div>
   </body></html>`);
-  win.document.close(); setTimeout(()=>win.print(),500);
+  win.document.close();
 };
 
 // Version fiche individuelle (ouvre une fenêtre séparée)
@@ -3911,15 +4055,15 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
         </div>
       </div>
       <div style="font-size:11px;color:var(--muted);margin-top:2px">
-        💡 La répartition tient compte du nombre réel de terrains de chaque salle afin que les deux salles terminent leurs matchs presque en même temps.
+        💡 Avec 2 salles ou plus, les équipes sont réparties <strong>proportionnellement au nombre de terrains</strong> de chaque salle, pour que toutes les salles finissent presque en même temps le matin et l'après-midi. Une équipe ne change jamais de salle au cours d'une même session. Si une salle a un effectif impair, 1 équipe y est exempte par tour (rotation équitable, +2 pts / 0-0).
       </div>
-      <div class="fr" style="margin-top:8px">
+      <div class="fr" id="cfg_hallmode_row" style="display:none;margin-top:8px">
         <div>
-          <label>Répartition des équipes entre les salles</label>
-          <select id="cfg_hall_mode" oninput="onCfgChange()">
-            <option value="balanced" selected>⚖️ Optimisée — fins de sessions équilibrées</option>
-            <option value="same">🔒 Même salle matin + après-midi</option>
-            <option value="switch">🔄 Changement de salle à midi</option>
+          <label>Salle de chaque équipe : matin → après-midi</label>
+          <select id="cfg_hallmode" onchange="onCfgChange()">
+            <option value="mix" selected>Mélange libre (certaines restent, d'autres changent)</option>
+            <option value="same">Même salle toute la journée</option>
+            <option value="swap">Changer de salle à midi (matin salle 1 → après-midi salle 2, et inversement)</option>
           </select>
         </div>
       </div>
@@ -3986,7 +4130,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
       </select>
     </div>
     <div class="info info-b" style="margin-top:12px;font-size:12px">
-      ℹ️ L'algorithme <strong>évite les confrontations entre équipes du même club</strong> et <strong>minimise les répétitions d'adversaires</strong>. Chaque équipe peut changer de salle entre le matin et l'après-midi.
+      ℹ️ L'algorithme <strong>évite les confrontations entre équipes du même club</strong> et <strong>minimise les répétitions d'adversaires</strong>. Une équipe ne change jamais de salle au cours d'une même session ; entre le matin et l'après-midi, elle reste dans la même salle, change de salle, ou est retirée au sort selon l'option choisie.
     </div>
   </div>
 
@@ -4129,7 +4273,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
     <div class="card">
       <div class="card-ttl" style="justify-content:space-between">
         <span>📋 Programme des équipes</span>
-        <button class="btn btn-g btn-xs" onclick="printAllTeamSchedules()">🖨 Imprimer les programmes (2 / 3 / 4 par A4)</button>
+        <button class="btn btn-ghost btn-xs" onclick="printAllTeamSchedules()" data-role="admin">🖨 Imprimer tout</button>
       </div>
       <div id="fichesTeamList" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;padding:4px 0"></div>
     </div>
@@ -4179,7 +4323,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
     <button class="btn btn-ghost" onclick="goTo(4)">← Retour au tournoi</button>
     <button class="btn btn-b btn-sm" onclick="exportStandingsPDF()" data-role="admin">📄 Export PDF</button>
     <button class="btn btn-ghost btn-sm" onclick="openMural()" data-role="admin">📺 Mural</button>
-    <button class="btn btn-g btn-sm" onclick="printAllTeamSchedules()">🖨 Imprimer les programmes (2 / 3 / 4 par A4)</button>
+    <button class="btn btn-ghost btn-sm" onclick="printAllTeamSchedules()" data-role="admin">🖨 Toutes les fiches</button>
   </div>
   <div class="flex g8 fw" style="margin-top:10px">
     <button class="btn btn-y btn-sm" onclick="resetAllScores()" data-role="admin">🔄 Réinitialiser les scores</button>
@@ -4191,13 +4335,9 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
 <!-- ══ PAGE ÉQUIPES SPECTATEUR ══ -->
 <div class="page" id="pageT">
 <div class="wrap">
-  <div class="sec-ttl" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-    <span>👥 Programme des équipes</span>
-    <button class="btn btn-g" onclick="printAllTeamSchedules()">🖨 Imprimer tous les programmes</button>
-  </div>
+  <div class="sec-ttl">👥 Programme des équipes</div>
   <div id="teamsSpecInfo" class="info info-b" style="margin-bottom:14px;font-size:12px">
-    <strong>Impression individuelle :</strong> cliquez sur le bouton 🖨 d’une équipe pour imprimer son programme complet matin + après-midi.
-    <br><strong>Impression groupée :</strong> utilisez « Imprimer tous les programmes » et choisissez 2, 3 ou 4 programmes par feuille A4.
+    Cliquez sur une équipe pour afficher et imprimer son programme complet.
   </div>
   <div id="teamsSpecGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px"></div>
 </div>
@@ -4216,7 +4356,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
         <li>Chaque équipe est représentée par un nom et un club d'appartenance.</li>
         <li>Les deux joueurs d'une équipe ne changent jamais de partenaire.</li>
         <li>Le tournoi se déroule en deux sessions : matin et après-midi.</li>
-        <li>Si le tournoi utilise 2 salles, chaque équipe reste dans la même salle toute la journée.</li>
+        <li>Si le tournoi utilise 2 salles, une équipe ne change jamais de salle au cours d'une même session (matin ou après-midi).</li>
       </ul>
     </div>
   </div>
@@ -4233,7 +4373,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
       <h4>Salles</h4>
       <ul>
         <li>En configuration <strong>1 salle</strong> : toutes les équipes jouent dans le même gymnase.</li>
-        <li>En configuration <strong>2 salles</strong> : les équipes sont réparties entre les deux salles dès le début du tournoi et n'en changent pas. L'admin peut affecter manuellement chaque équipe à une salle, ou laisser la répartition automatique.</li>
+        <li>En configuration <strong>2 salles</strong> : les équipes sont réparties entre les deux salles proportionnellement au nombre de terrains de chacune, afin que les deux salles terminent presque en même temps le matin et l'après-midi. Une équipe reste dans la même salle pendant toute la session ; à midi, selon le réglage de l'admin, elle reste dans la même salle, change de salle, ou est retirée au sort.</li>
       </ul>
     </div>
   </div>
