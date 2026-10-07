@@ -1359,7 +1359,7 @@ function renderFichesPanel(){
       <div style="font-weight:700;font-family:'Oswald',sans-serif;font-size:14px;color:var(--ink)">${t.name}</div>
       <div style="font-size:11px;color:var(--muted)">${t.p1} · ${t.p2}</div>
       ${nextHtml}
-      <div style="font-size:10px;color:var(--dim);margin-top:4px">🖨 Cliquer pour imprimer la fiche</div>
+      <button class="btn btn-ghost btn-xs" onclick="event.stopPropagation();printTeamScheduleSingle('${t.id}')" style="margin-top:7px">🖨 Imprimer le programme complet</button>
     </div>`;
   }).join('');
 }
@@ -1426,7 +1426,7 @@ function renderTeamsSpecPage(){
         </tr></thead>
         <tbody>${rowsHtml}</tbody>
       </table>`:'<div style="color:var(--muted);font-size:11px">Planning non généré</div>'}
-      <div style="font-size:10px;color:var(--dim);margin-top:8px;text-align:right">🖨 Cliquer pour imprimer</div>
+      <div style="text-align:right;margin-top:8px"><button class="btn btn-ghost btn-xs" onclick="event.stopPropagation();printTeamScheduleSingle('${t.id}')">🖨 Imprimer le programme complet</button></div>
     </div>`;
   }).join('');
 }
@@ -4129,7 +4129,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
     <div class="card">
       <div class="card-ttl" style="justify-content:space-between">
         <span>📋 Programme des équipes</span>
-        <button class="btn btn-ghost btn-xs" onclick="printAllTeamSchedules()" data-role="admin">🖨 Imprimer tout</button>
+        <button class="btn btn-g btn-xs" onclick="printAllTeamSchedules()">🖨 Imprimer les programmes (2 / 3 / 4 par A4)</button>
       </div>
       <div id="fichesTeamList" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;padding:4px 0"></div>
     </div>
@@ -4179,7 +4179,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
     <button class="btn btn-ghost" onclick="goTo(4)">← Retour au tournoi</button>
     <button class="btn btn-b btn-sm" onclick="exportStandingsPDF()" data-role="admin">📄 Export PDF</button>
     <button class="btn btn-ghost btn-sm" onclick="openMural()" data-role="admin">📺 Mural</button>
-    <button class="btn btn-ghost btn-sm" onclick="printAllTeamSchedules()" data-role="admin">🖨 Toutes les fiches</button>
+    <button class="btn btn-g btn-sm" onclick="printAllTeamSchedules()">🖨 Imprimer les programmes (2 / 3 / 4 par A4)</button>
   </div>
   <div class="flex g8 fw" style="margin-top:10px">
     <button class="btn btn-y btn-sm" onclick="resetAllScores()" data-role="admin">🔄 Réinitialiser les scores</button>
@@ -4191,9 +4191,13 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
 <!-- ══ PAGE ÉQUIPES SPECTATEUR ══ -->
 <div class="page" id="pageT">
 <div class="wrap">
-  <div class="sec-ttl">👥 Programme des équipes</div>
+  <div class="sec-ttl" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+    <span>👥 Programme des équipes</span>
+    <button class="btn btn-g" onclick="printAllTeamSchedules()">🖨 Imprimer tous les programmes</button>
+  </div>
   <div id="teamsSpecInfo" class="info info-b" style="margin-bottom:14px;font-size:12px">
-    Cliquez sur une équipe pour afficher et imprimer son programme complet.
+    <strong>Impression individuelle :</strong> cliquez sur le bouton 🖨 d’une équipe pour imprimer son programme complet matin + après-midi.
+    <br><strong>Impression groupée :</strong> utilisez « Imprimer tous les programmes » et choisissez 2, 3 ou 4 programmes par feuille A4.
   </div>
   <div id="teamsSpecGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px"></div>
 </div>
