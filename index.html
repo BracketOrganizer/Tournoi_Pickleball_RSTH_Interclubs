@@ -3233,7 +3233,7 @@ function _teamSlipHtml(tid){
     if(r.type==='bye') return `<tr class="bye"><td class="t">${r.time}</td><td class="c">—</td><td>🟡 Exempt (repos)</td></tr>`;
     const o=tObj(r.opp);
     const club=o&&o.club&&o.club!=='—'?` <span class="cl">${o.club}</span>`:'';
-    return `<tr><td class="t">${r.time}</td><td class="c">${r.hall?r.hall+' · ':''}${r.court}</td><td><strong>${o?o.name:r.opp}</strong>${club}</td></tr>`;
+    return `<tr><td class="t">${r.time}</td><td class="c">${r.hall?r.hall+' · ':''}${r.court}</td><td><strong>${o?o.name:r.opp}</strong>${club}${o?`<br><span class="pl">👤 ${o.p1} &amp; ${o.p2}</span>`:''}</td></tr>`;
   };
   const secHdr=(ico,lbl,a)=>{ const h=multi?hallsOf(a):''; return `<tr class="sec"><td colspan="3">${ico} ${lbl}${h?' — '+h:''}</td></tr>`; };
   let body=secHdr('☀️','MATIN',am)+am.map(rowHtml).join('');
@@ -3300,6 +3300,7 @@ window.printAllTeamSchedules = function(){
     .slip td.t{font-weight:700;width:14%;white-space:nowrap}
     .slip td.c{color:#7040b0;font-weight:700;white-space:nowrap;width:30%}
     .slip .cl{color:#888;font-size:.8em}
+    .slip .pl{color:#555;font-size:.85em}
     .slip tr.sec td{background:#e6ebf5;font-weight:700;color:#1a2540;padding:3px 6px}
     .slip tr.lunch td{text-align:center;font-style:italic;color:#555;background:#f6f6f6}
     .slip tr.bye td{background:#fffbe8;color:#8a6200}
@@ -3327,7 +3328,7 @@ window.printAllTeamSchedules = function(){
   <div class="noprint">
     <strong>🏓 Fiches équipes — ${slips.length} équipes</strong>
     <label>Format :
-      <select onchange="document.querySelectorAll('.view').forEach(function(e){e.classList.toggle('on',e.id==='v'+this.value)}.bind(this))">
+      <select onchange="setView(this.value)">
         <option value="2">2 équipes par feuille A4</option>
         <option value="3">3 équipes par feuille A4</option>
         <option value="4" selected>4 équipes par feuille A4</option>
@@ -3344,6 +3345,22 @@ window.printAllTeamSchedules = function(){
   <div class="view" id="v6">${pages(6)}</div>
   <div class="view" id="v8">${pages(8)}</div>
   <div class="view grid" id="vd">${dense.join('')}</div>
+  <script>
+    // Réduit automatiquement le texte d'une fiche si son contenu dépasse la case (noms très longs)
+    function fit(){
+      document.querySelectorAll('.view.on .slip').forEach(function(s){
+        s.style.fontSize='';
+        var fs=parseFloat(getComputedStyle(s).fontSize);
+        while((s.scrollHeight>s.clientHeight+1||s.scrollWidth>s.clientWidth+1)&&fs>5.5){ fs-=0.25; s.style.fontSize=fs+'px'; }
+      });
+    }
+    function setView(v){
+      document.querySelectorAll('.view').forEach(function(e){ e.classList.toggle('on',e.id==='v'+v); });
+      fit();
+    }
+    window.addEventListener('load',fit);
+    window.addEventListener('beforeprint',fit);
+  <\/script>
   </body></html>`);
   win.document.close();
 };
