@@ -3278,10 +3278,10 @@ window.updateMural = function(){
   el.innerHTML = st.map((s,i)=>{
     const gd = s.gf-s.ga;
     const isTop3 = i<3;
-    const bgColor = i===0?'linear-gradient(135deg,#1a1208,#2a2008)':i===1?'linear-gradient(135deg,#101520,#181e30)':i===2?'linear-gradient(135deg,#141008,#201808)':'linear-gradient(135deg,#0d1a30,#132240)';
-    const borderColor = i===0?'#d4a820':i===1?'#7090c0':i===2?'#a06030':'rgba(255,255,255,.18)';
+    const bgColor = i===0?'linear-gradient(135deg,#3a2c08,#52400c)':i===1?'linear-gradient(135deg,#343c4e,#4a5470)':i===2?'linear-gradient(135deg,#3a2210,#54331a)':'linear-gradient(135deg,#0a1424,#0f1c34)';
+    const borderColor = i===0?'#f0c030':i===1?'#c0d0e8':i===2?'#c87c40':'rgba(255,255,255,.15)';
     return `<div style="background:${bgColor};border:2px solid ${borderColor};border-radius:12px;padding:16px 18px;display:flex;align-items:center;gap:14px">
-      <div style="font-family:'Oswald',sans-serif;font-size:${isTop3?36:28}px;min-width:50px;text-align:center;color:${i===0?'#d4a820':i===1?'#7090c0':i===2?'#a06030':'rgba(255,255,255,.4)'}">${med[i]||i+1}</div>
+      <div style="font-family:'Oswald',sans-serif;font-size:${isTop3?36:28}px;min-width:50px;text-align:center;color:${i===0?'#f0c030':i===1?'#c0d0e8':i===2?'#c87c40':'rgba(255,255,255,.4)'}">${med[i]||i+1}</div>
       <div style="flex:1;min-width:0">
         <div style="font-family:'Oswald',sans-serif;font-size:${isTop3?20:16}px;color:#e8edf5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s.name}</div>
         <div style="font-size:11px;color:rgba(255,255,255,.4);margin-top:2px">${s.club!=='—'?s.club+' · ':''} ${s.p1} & ${s.p2}</div>
