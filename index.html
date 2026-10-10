@@ -87,7 +87,7 @@ const ST = {
   cfg:{
     n:32,          // nombre d'équipes
     t:8,           // terrains par salle (total si 1 salle, par salle si 2)
-    halls:1,       // 1 ou 2 salles
+    halls:1,       // 1 à 4 salles
     matchesMorning:3,   // 3 ou 4 matchs le matin
     matchesAfternoon:4, // 4 ou 3 matchs l'après-midi
     mt:15,         // durée match (min)
@@ -809,8 +809,10 @@ window.toggleRules = function(){
 // Objectif : que toutes les salles finissent leur session (matin / après-midi)
 // presque en même temps, même si le nombre de terrains diffère d'une salle à l'autre.
 // => le nombre d'équipes de chaque salle est proportionnel à ses terrains.
-function _courtsArr(numHalls,t1,t2){
-  return [t1,t2,t1,t1].slice(0,Math.max(1,numHalls||1)).map(c=>Math.max(1,+c||1));
+function _courtsArr(numHalls,t1,t2,t3,t4){
+  const dom=id=>{ const el=document.getElementById(id); return el ? +el.value : NaN; };
+  const c3 = t3!=null ? +t3 : dom('cfg_t3'), c4 = t4!=null ? +t4 : dom('cfg_t4');
+  return [t1,t2,(c3>0?c3:t1),(c4>0?c4:t1)].slice(0,Math.max(1,numHalls||1)).map(c=>Math.max(1,+c||1));
 }
 // Nb de créneaux horaires nécessaires à une salle de `s` équipes, `c` terrains, `K` tours
 function _effSlots(s,c,K){
@@ -877,8 +879,8 @@ function _swapFlows(am,pm){
   for(let i=0;i<H;i++){ f[i][i]+=rowR[i]; rowR[i]=0; }
   return f;
 }
-function _calcGroups(n, numHalls, t1, t2, K){
-  const courts=_courtsArr(numHalls,t1,t2);
+function _calcGroups(n, numHalls, t1, t2, K, t3, t4){
+  const courts=_courtsArr(numHalls,t1,t2,t3,t4);
   const sizes=_bestSizes(n,courts,[K||4]);
   const cp=sizes.map(s=>Math.floor(s/2));
   return { numGroups:courts.length, sizes, courtsPerGroup:cp, totalCourts:cp.reduce((a,b)=>a+b,0), oddGroups:sizes.filter(s=>s%2===1).length };
@@ -898,6 +900,8 @@ function getCfg(){
   const halls   = +(document.getElementById('cfg_halls')?.value||1);
   const t1      = +(document.getElementById('cfg_t1')?.value||8);
   const t2      = +(document.getElementById('cfg_t2')?.value||t1);
+  const t3      = +(document.getElementById('cfg_t3')?.value||t1);
+  const t4      = +(document.getElementById('cfg_t4')?.value||t1);
   const wMode   = document.getElementById('cfg_wave_mode')?.value || 'auto';
   const targetMatchesPerTeam = +(document.getElementById('cfg_matches_per_team')?.value||5);
   let morning, afternoon;
@@ -920,7 +924,7 @@ function getCfg(){
     bal:            document.getElementById('cfg_bal')?.value||'level',
     matchesMorning:   morning,
     matchesAfternoon: afternoon,
-    halls, t1, t2,
+    halls, t1, t2, t3, t4,
     hallMode: document.getElementById('cfg_hallmode')?.value || 'mix',
     targetMatchesPerTeam,
   };
@@ -942,8 +946,12 @@ function syncCfgForm(){
   setV('cfg_halls', halls);
   setV('cfg_t1', t1);
   setV('cfg_t2', t2);
+  setV('cfg_t3', c.t3||t1);
+  setV('cfg_t4', c.t4||t1);
   const t2row = document.getElementById('cfg_t2_row');
   if(t2row) t2row.style.display = halls>=2 ? '' : 'none';
+  const t3row = document.getElementById('cfg_t3_row'); if(t3row) t3row.style.display = halls>=3 ? '' : 'none';
+  const t4row = document.getElementById('cfg_t4_row'); if(t4row) t4row.style.display = halls>=4 ? '' : 'none';
   setV('cfg_matches_per_team', c.targetMatchesPerTeam||5);
   setV('cfg_hallmode', c.hallMode||'mix');
   // Mode manuel si cfg a des comptes différents du calcul auto
@@ -982,6 +990,8 @@ window.onCfgChange = function(){
   const halls = +(document.getElementById('cfg_halls')?.value||1);
   const t2rowEl = document.getElementById('cfg_t2_row');
   if(t2rowEl) t2rowEl.style.display = halls>=2 ? '' : 'none';
+  const t3rowEl = document.getElementById('cfg_t3_row'); if(t3rowEl) t3rowEl.style.display = halls>=3 ? '' : 'none';
+  const t4rowEl = document.getElementById('cfg_t4_row'); if(t4rowEl) t4rowEl.style.display = halls>=4 ? '' : 'none';
   const hmRow = document.getElementById('cfg_hallmode_row');
   if(hmRow) hmRow.style.display = (halls>=2 && lunchCk) ? '' : 'none';
 
@@ -1145,8 +1155,8 @@ function buildSchedule(){
   allIds.forEach(id=>{ oppCount[id]={}; playCount[id]=0; byeCount[id]=0; });
 
   const halls = cfg.halls||1;
-  const courtsArr = [cfg.t1||8, cfg.t2||cfg.t1||8, cfg.t1||8, cfg.t1||8].slice(0,halls);
-  const numGroups = _calcGroups(N, halls, cfg.t1||8, cfg.t2||cfg.t1||8).numGroups;
+  const courtsArr = [cfg.t1||8, cfg.t2||cfg.t1||8, cfg.t3||cfg.t1||8, cfg.t4||cfg.t1||8].slice(0,halls);
+  const numGroups = _calcGroups(N, halls, cfg.t1||8, cfg.t2||cfg.t1||8, undefined, cfg.t3, cfg.t4).numGroups;
 
   // Effectifs de chaque salle, proportionnels à ses terrains → toutes les salles
   // finissent à peu près en même temps (matin et après-midi).
@@ -4356,6 +4366,14 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
         <div id="cfg_t2_row" style="display:none">
           <label>Terrains salle 2</label>
           <input type="number" id="cfg_t2" value="8" min="1" max="30" oninput="onCfgChange()">
+        </div>
+        <div id="cfg_t3_row" style="display:none">
+          <label>Terrains salle 3</label>
+          <input type="number" id="cfg_t3" value="8" min="1" max="30" oninput="onCfgChange()">
+        </div>
+        <div id="cfg_t4_row" style="display:none">
+          <label>Terrains salle 4</label>
+          <input type="number" id="cfg_t4" value="8" min="1" max="30" oninput="onCfgChange()">
         </div>
       </div>
       <div style="font-size:11px;color:var(--muted);margin-top:2px">
