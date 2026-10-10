@@ -407,8 +407,9 @@ async function saveTournament(patch){
     if('liveOpen' in patch){
       await setDoc(doc(db,'interclub','status'), { liveOpen: patch.liveOpen }, {merge:true});
     }
+    return true;
   }
-  catch(e){ console.error('Save error:',e); }
+  catch(e){ console.error('Save error:',e); return false; }
 }
 async function saveResult(key, ga, gb){
   try { await setDoc(doc(db,'interclub_results',key), {ga, gb, ts: serverTimestamp()}, {merge:true}); }
@@ -2851,12 +2852,13 @@ window.goToLive = function(){
 function fmt(s){ return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); }
 
 // Chrono PARTAGÉ : l'état est stocké dans interclub/current.timers (lu en temps réel par
-// admin, scorer, spectateurs et écran). Seul l'admin écrit ; les autres ne font que regarder.
+// admin, scorer, spectateurs et écran). Admin et scorer commandent le chrono ; les autres ne font que regarder.
 // État d'une salle : { state:'idle'|'running'|'paused', mode:'match'|'trans', rem:<ms restantes
-// au moment 'at'>, at:<Date.now() du démarrage> }. Chaque appareil calcule lui-même le temps
+// au moment 'at'>, at:<serverNow() du démarrage> }. Chaque appareil calcule lui-même le temps
 // restant -> aucun envoi par seconde, et même affichage partout.
 let _tkLast = {}, _tkSig = '', _sndRoleInit = false, _sndMode = 'all'; // _sndMode : 'none' | 'h1'..'h4' | 'all' (choix propre à chaque appareil)
 function timerSoundWants(k){
+  if(ST.page==='TV') return !(ST.timers && ST.timers.tvSound===false); // écran TV : suit le bouton « Son TV » (toutes salles)
   if(_sndMode==='none') return false;
   if(timerIsLinked()) return true;           // un seul chrono : une seule sonnerie
   return _sndMode==='all' || _sndMode===k;
@@ -2867,13 +2869,13 @@ window.timerSetSound = function(m){
   _getAC(); try{ _unlockAudio(); }catch(e){}
 };
 function timerIdle(){ return {state:'idle', mode:'match', rem:0, at:0}; }
-function timersDefault(){ const t={linked:true}; for(let i=1;i<=4;i++) t['h'+i]=timerIdle(); return t; }
+function timersDefault(){ const t={linked:true}; for(let i=1;i<=4;i++) t['h'+i]=timerIdle(); if(ST.timers && ST.timers.tvSound===false) t.tvSound=false; return t; }
 function timerHallKeys(){ const n=Math.min(4,Math.max(1,+(ST.cfg&&ST.cfg.halls)||1)); return Array.from({length:n},(_,i)=>'h'+(i+1)); }
 function timerIsLinked(){ return !ST.timers || ST.timers.linked!==false || timerHallKeys().length<2; }
 function timerView(key){
   const t=(ST.timers&&ST.timers[key])||timerIdle();
   let ms=t.rem||0;
-  if(t.state==='running') ms=Math.max(0, ms-(Date.now()-(t.at||0)));
+  if(t.state==='running') ms=Math.max(0, ms-(serverNow()-(t.at||0)));
   const sec=Math.ceil(ms/1000);
   let status='idle';
   if(t.state==='paused') status='paused';
@@ -2918,10 +2920,12 @@ function renderTimerPanel(){
     let cur=_sndMode; if(!opts.some(o=>o[0]===cur)) cur = cur==='none' ? 'none' : 'all';
     sel.innerHTML=opts.map(o=>`<option value="${o[0]}" ${o[0]===cur?'selected':''}>${o[1]}</option>`).join('');
   }
-  // Commandes : admin uniquement
+  const tvb=document.getElementById('tvSoundToggle');
+  if(tvb){ const on=!(ST.timers && ST.timers.tvSound===false); tvb.textContent = on ? '📺🔊 Son TV : activé' : '📺🔇 Son TV : coupé'; tvb.title = on ? "Le chrono sonne sur l'écran TV (cliquer pour couper)" : "Le chrono est muet sur l'écran TV (cliquer pour activer)"; }
+  // Commandes : admin + scorer
   const ctl=document.getElementById('timerCtl');
   if(ctl){
-    if(!isAdmin()){ ctl.innerHTML=''; }
+    if(!isScorer()){ ctl.innerHTML=''; }
     else {
       const groups = linked ? ['all'] : keys;
       let html = groups.map(g=>{
@@ -2976,14 +2980,14 @@ function timerTick(){
     if(e && timerSoundWants(k)) evs.push({k,e});
   });
   // Si on écoute plusieurs salles : chaque salle a sa hauteur de son (salle 2 plus aiguë...) et les sirènes se suivent
-  const multiSound = !timerIsLinked() && _sndMode==='all';
+  const multiSound = !timerIsLinked() && (_sndMode==='all' || ST.page==='TV');
   let sirenN=0;
   evs.forEach(({k,e})=>{
     const pitch = multiSound ? [1,1.4,1.8,2.2][(+k.slice(1))-1] : 1;
     const delay = e==='siren' ? (sirenN++)*2800 : 0;
-    const go=()=>{ const old=_tkPitch; _tkPitch=pitch;
+    const go=()=>{ const old=_tkPitch, oldSnd=_soundEnabled; _tkPitch=pitch; if(ST.page==='TV') _soundEnabled=true; // la TV ne dépend pas du réglage « cet appareil »
       try{ if(e==='siren') _playSiren(2.5,0.9); else if(e==='warn') _playWarn30(); else _playCountdownBeep(e==='last'); }
-      finally{ _tkPitch=old; } };
+      finally{ _tkPitch=old; _soundEnabled=oldSnd; } };
     if(delay) setTimeout(go,delay); else go();
     if(e==='siren'||e==='warn') document.querySelectorAll('[data-tk="'+k+'"]').forEach(el=>{
       const par=el.parentElement; if(!par) return; par.classList.add('tk-ring'); setTimeout(()=>par.classList.remove('tk-ring'),3000);
@@ -2995,34 +2999,35 @@ setInterval(timerTick, 250);
 document.addEventListener('pointerdown', ()=>{ try{ _unlockAudio(); }catch(e){} }, {once:true});
 
 async function timerWrite(keys, mk){
-  if(!isAdmin()) return;
+  if(!isScorer()) return;
   if(!ST.timers) ST.timers = timersDefault();
   const patch={};
   keys.forEach(k=>{ ST.timers[k]=mk(ST.timers[k]||timerIdle(), k); patch[k]=ST.timers[k]; });
   renderTimerPanel();
-  await saveTournament({ timers: patch });
+  const ok = await saveTournament({ timers: patch });
+  if(ok===false) alert("Chrono : enregistrement refusé (droits Firestore ou connexion). Vérifiez que votre rôle est bien admin ou scorer.");
 }
 window.timerStart = function(mode, grp){
-  if(!isAdmin()) return;
+  if(!isScorer()) return;
   _unlockAudio();
   const keys=timerTargets(grp);
   if(keys.some(k=>{ const st=timerView(k).status; return st==='running'||st==='paused'; })
      && !confirm('Un chrono est déjà en cours. Le relancer à zéro ?')) return;
   const ms=(mode==='match'?ST.cfg.mt:ST.cfg.tt)*60000;
-  timerWrite(keys, ()=>({state:'running', mode, rem:ms, at:Date.now()}));
+  timerWrite(keys, ()=>({state:'running', mode, rem:ms, at:serverNow()}));
 };
 window.timerPause = function(grp){
   timerWrite(timerTargets(grp), (t,k)=>{ const v=timerView(k); return v.status==='running' ? {state:'paused', mode:t.mode, rem:v.ms, at:0} : t; });
 };
 window.timerResume = function(grp){
   _unlockAudio();
-  timerWrite(timerTargets(grp), (t)=> t.state==='paused' ? {state:'running', mode:t.mode, rem:t.rem, at:Date.now()} : t);
+  timerWrite(timerTargets(grp), (t)=> t.state==='paused' ? {state:'running', mode:t.mode, rem:t.rem, at:serverNow()} : t);
 };
 window.timerReset = function(grp){
   timerWrite(timerTargets(grp), ()=>timerIdle());
 };
 window.timerSetLinked = async function(on){
-  if(!isAdmin()) return;
+  if(!isScorer()) return;
   if(!ST.timers) ST.timers = timersDefault();
   ST.timers.linked = !!on;
   const patch={ linked: !!on };
@@ -3033,6 +3038,35 @@ window.timerSetLinked = async function(on){
   renderTimerPanel();
   await saveTournament({ timers: patch });
 };
+
+// Son du chrono sur l'écran TV : activé / coupé pour tous les écrans TV (réglage partagé, admin + scorer)
+window.toggleTvSound = async function(){
+  if(!isScorer()) return;
+  if(!ST.timers) ST.timers = timersDefault();
+  const on = !(ST.timers.tvSound===false);
+  ST.timers.tvSound = !on;
+  renderTimerPanel();
+  const ok = await saveTournament({ timers: { tvSound: !on } });
+  if(ok===false) alert("Son TV : enregistrement refusé (droits Firestore ou connexion).");
+};
+
+// Correction d'horloge : si l'horloge de l'appareil est décalée de plus de 3 s par rapport au
+// serveur web, on compense (sinon 0 : l'horloge locale est fiable) -> chronos identiques partout.
+var clockOffsetMs = 0; // (var : évite toute erreur si le chrono est calculé avant cette ligne)
+function serverNow(){ return Date.now() + (clockOffsetMs||0); }
+(async function estimateClockOffset(){
+  try {
+    if(!/^https?:$/.test(location.protocol)) return;
+    const t0 = Date.now();
+    const r = await fetch(location.href.split('#')[0], { method:'HEAD', cache:'no-store' });
+    const t1 = Date.now();
+    const h = r.headers.get('date'); if(!h) return;
+    let srv = new Date(h).getTime(); if(isNaN(srv)) return;
+    srv += (parseInt(r.headers.get('age')||'0',10)||0)*1000 + 500; // l'en-tête Date est tronqué à la seconde
+    const off = srv - (t0 + (t1 - t0)/2);
+    clockOffsetMs = Math.abs(off) > 3000 ? Math.round(off) : 0;
+  } catch(e){ /* pas de correction possible : on garde l'horloge locale */ }
+})();
 
 // ── AUDIO ───────────────────────────────────────────────
 let _AC=null, _soundEnabled=true, _tkPitch=1;
@@ -4500,11 +4534,12 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
     <button id="stab_classement" onclick="showSpectatorTab('classement')" style="padding:7px 16px;font-family:'Oswald',sans-serif;font-size:13px;letter-spacing:.5px;border:none;border-bottom:2px solid transparent;margin-bottom:-2px;background:none;color:var(--muted);cursor:pointer">🏆 CLASSEMENT</button>
   </div>
 
-  <!-- CHRONO partagé : visible par tous (spectateurs en lecture seule), commandes réservées à l'admin -->
+  <!-- CHRONO partagé : visible par tous (spectateurs en lecture seule), commandes admin + scorer -->
   <div class="timer-wrap" id="timerWrap">
     <div class="timer-clocks" id="timerClocks"></div>
     <div class="timer-btns">
       <div class="timer-ctl" id="timerCtl"></div>
+      <button class="btn btn-ghost btn-sm" id="tvSoundToggle" data-role="scorer" style="display:none" onclick="toggleTvSound()" title="Son du chrono sur l'écran TV">📺🔊 Son TV</button>
       <label class="timer-snd-lbl">🔔 Sonnerie sur cet appareil : <select id="soundSel" onchange="timerSetSound(this.value)"></select></label>
     </div>
   </div>
