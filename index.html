@@ -25,7 +25,7 @@ import { initializeApp }            from 'https://www.gstatic.com/firebasejs/10.
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword,
          createUserWithEmailAndPassword, signInWithRedirect, signInWithPopup, getRedirectResult, GoogleAuthProvider,
          signOut, updateProfile }   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
-import { getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot, collection,
+import { getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot, disableNetwork, enableNetwork, collection,
          addDoc, updateDoc, serverTimestamp, query, orderBy, getDocs, where }
                                     from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
 
@@ -303,11 +303,12 @@ function startLiveWatch(){
   }, (e)=>{ console.warn('startLiveWatch', e); });
   if(!liveWatchIv){
     liveWatchIv = setInterval(async ()=>{
+      if (document.hidden) return; // inutile quand l'écran est éteint ou l'onglet masqué
       try {
         const snap = await getDoc(doc(db,'interclub','status'));
         if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
       } catch(e){ console.warn('liveWatch poll error:', e); }
-    }, 4000);
+    }, 30000);
   }
 }
 function stopLiveWatch(){
@@ -3697,6 +3698,32 @@ window.exportStandingsPDF = function(){
   setTimeout(()=>win.print(),400);
 };
 
+
+// ══════════════════════════════════════════════════════════
+// ÉCONOMIE DE LECTURES FIRESTORE (spectateurs)
+// Un spectateur dont l'appli reste masquée (onglet en arrière-plan, écran éteint)
+// plus de 10 minutes ne reçoit plus les mises à jour (chacune compterait comme une
+// lecture) : la connexion Firestore est mise en pause, puis rétablie dès qu'il revient.
+// Ne s'applique ni à l'admin / scorer, ni à l'écran TV.
+// ══════════════════════════════════════════════════════════
+const BG_PAUSE_MS = 10 * 60 * 1000;
+let _bgPauseTimer = null, _bgPaused = false;
+function isBackgroundPausable() {
+  if (typeof ST !== 'undefined' && ST.page === 'TV') return false;
+  return (USER_ROLES || []).every(r => r === 'spectator' || r === 'spectateur');
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    clearTimeout(_bgPauseTimer);
+    _bgPauseTimer = setTimeout(async () => {
+      if (!document.hidden || _bgPaused || !isBackgroundPausable()) return;
+      try { await disableNetwork(db); _bgPaused = true; } catch (e) { /* ignore */ }
+    }, BG_PAUSE_MS);
+  } else {
+    clearTimeout(_bgPauseTimer); _bgPauseTimer = null;
+    if (_bgPaused) { _bgPaused = false; enableNetwork(db).catch(() => {}); }
+  }
+});
 </script>
 
 <style>
