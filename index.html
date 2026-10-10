@@ -3050,23 +3050,39 @@ window.toggleTvSound = async function(){
   if(ok===false) alert("Son TV : enregistrement refusé (droits Firestore ou connexion).");
 };
 
-// Correction d'horloge : si l'horloge de l'appareil est décalée de plus de 3 s par rapport au
-// serveur web, on compense (sinon 0 : l'horloge locale est fiable) -> chronos identiques partout.
+// Horloge commune à tous les appareils (voir estimateClockOffset ci-dessous)
 var clockOffsetMs = 0; // (var : évite toute erreur si le chrono est calculé avant cette ligne)
 function serverNow(){ return Date.now() + (clockOffsetMs||0); }
-(async function estimateClockOffset(){
+// Calibration d'horloge (précision ~100 ms) : on interroge le serveur web en rafale et on repère
+// l'instant exact où l'en-tête HTTP « Date » change de seconde. Ainsi tous les appareils (PC dont
+// l'horloge dérive, mobiles) calculent le chrono sur la même heure, même avec quelques secondes d'écart.
+var _clkBusy = false;
+async function estimateClockOffset(){
+  if(_clkBusy) return; _clkBusy = true;
   try {
     if(!/^https?:$/.test(location.protocol)) return;
-    const t0 = Date.now();
-    const r = await fetch(location.href.split('#')[0], { method:'HEAD', cache:'no-store' });
-    const t1 = Date.now();
-    const h = r.headers.get('date'); if(!h) return;
-    let srv = new Date(h).getTime(); if(isNaN(srv)) return;
-    srv += (parseInt(r.headers.get('age')||'0',10)||0)*1000 + 500; // l'en-tête Date est tronqué à la seconde
-    const off = srv - (t0 + (t1 - t0)/2);
-    clockOffsetMs = Math.abs(off) > 3000 ? Math.round(off) : 0;
+    const base = location.href.split('#')[0].split('?')[0];
+    const offs = []; let prev = null;
+    for(let i=0; i<30 && offs.length<2; i++){
+      const t0 = Date.now();
+      const r = await fetch(base+'?_clk='+t0+'_'+i, { method:'HEAD', cache:'no-store' });
+      const t1 = Date.now();
+      const h = r.headers.get('date'); if(!h) return;
+      const ms = new Date(h).getTime(); if(isNaN(ms)) return;
+      const cur = { sec: Math.floor(ms/1000), mid: (t0+t1)/2 };
+      // la seconde du serveur a changé entre les deux mesures : la frontière est entre prev.mid et cur.mid
+      if(prev && cur.sec > prev.sec && cur.sec - prev.sec <= 2) offs.push(cur.sec*1000 - (prev.mid+cur.mid)/2);
+      prev = cur;
+    }
+    if(offs.length){
+      const off = offs.reduce((a,b)=>a+b,0)/offs.length;
+      clockOffsetMs = Math.abs(off) > 400 ? Math.round(off) : 0;
+    }
   } catch(e){ /* pas de correction possible : on garde l'horloge locale */ }
-})();
+  finally { _clkBusy = false; }
+}
+estimateClockOffset();
+setInterval(estimateClockOffset, 15*60*1000);
 
 // ── AUDIO ───────────────────────────────────────────────
 let _AC=null, _soundEnabled=true, _tkPitch=1;
