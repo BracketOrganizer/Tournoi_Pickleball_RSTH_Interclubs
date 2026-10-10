@@ -2939,7 +2939,7 @@ function renderTimerPanel(){
           ${v.status!=='idle'?`<button class="btn btn-ghost btn-xs" onclick="timerReset('${g}')">⏹ Remise à zéro</button>`:''}
         </div>`;
       }).join('');
-      if(multi) html += `<label class="timer-link-lbl"><input type="checkbox" ${linked?'checked':''} onchange="timerSetLinked(this.checked)"> 🔗 Chronos liés (une seule commande pour toutes les salles)</label>`;
+      if(multi && isAdmin()) html += `<label class="timer-link-lbl"><input type="checkbox" ${linked?'checked':''} onchange="timerSetLinked(this.checked)"> 🔗 Chronos liés (une seule commande pour toutes les salles)</label>`;
       ctl.innerHTML=html;
     }
   }
@@ -3027,7 +3027,7 @@ window.timerReset = function(grp){
   timerWrite(timerTargets(grp), ()=>timerIdle());
 };
 window.timerSetLinked = async function(on){
-  if(!isScorer()) return;
+  if(!isAdmin()) return; // chronos liés / séparés : choix réservé à l'admin
   if(!ST.timers) ST.timers = timersDefault();
   ST.timers.linked = !!on;
   const patch={ linked: !!on };
