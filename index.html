@@ -1171,44 +1171,66 @@ function makeRoundMatches(active, maxCourts, oppCount){
 // On peut compléter un créneau avec le tour suivant, mais on pénalise les équipes
 // qui ont déjà joué au créneau précédent (et, plus légèrement, deux créneaux avant).
 // Cela conserve une bonne occupation des terrains tout en limitant les matchs à la suite.
-function packSlots(allMatches,courts){
-  const remaining=[...allMatches], slots=[], lastPlayedAt=new Map();
+function packSlots(allMatches,courts,initialPlayedTeams=new Set()){
   const capacity=Math.max(1,Math.floor(+courts||1));
-  while(remaining.length){
-    const firstTour=Math.min(...remaining.map(m=>m.tourIdx));
-    const slot=[], used=new Set(), picked=new Set();
-    while(slot.length<capacity){
-      const candidates=[];
-      for(let i=0;i<remaining.length;i++){
-        const m=remaining[i];
-        if(m.tourIdx>firstTour+1) continue;
-        if(used.has(m.tA)||used.has(m.tB)) continue;
-        const penalty=id=>{
-          const last=lastPlayedAt.get(id);
-          if(last===slots.length-1) return 8;
-          if(last===slots.length-2) return 2;
-          return 0;
-        };
-        const score=(m.tourIdx-firstTour)*25+penalty(m.tA)+penalty(m.tB)+Math.random()*0.2;
-        candidates.push({i,m,score});
+  const playedImmediatelyBefore = initialPlayedTeams instanceof Set ? initialPlayedTeams : new Set(initialPlayedTeams||[]);
+  let bestSlots=null, bestConsecutive=Infinity;
+  // Plusieurs essais avec les mêmes matchs : on conserve d'abord le planning le
+  // plus court, puis celui qui impose le moins de matchs consécutifs.
+  const attempts=12;
+  for(let attempt=0;attempt<attempts;attempt++){
+    const remaining=shuffle(allMatches), slots=[], lastPlayedAt=new Map();
+    while(remaining.length){
+      const firstTour=Math.min(...remaining.map(m=>m.tourIdx));
+      const slot=[], used=new Set(), picked=new Set();
+      while(slot.length<capacity){
+        const candidates=[];
+        for(let i=0;i<remaining.length;i++){
+          const m=remaining[i];
+          if(m.tourIdx>firstTour+1) continue;
+          if(used.has(m.tA)||used.has(m.tB)) continue;
+          const immediateConflict=id=>{
+            const last=lastPlayedAt.get(id);
+            return last===slots.length-1 || (slots.length===0 && playedImmediatelyBefore.has(id));
+          };
+          const conflict=immediateConflict(m.tA)||immediateConflict(m.tB);
+          const score=(m.tourIdx-firstTour)*25+Math.random()*0.2;
+          candidates.push({i,m,score,conflict});
+        }
+        if(!candidates.length) break;
+        const safeCandidates=candidates.filter(c=>!c.conflict);
+        if(!safeCandidates.length){
+          // Ne pas imposer un match consécutif si l'on peut intercaler un créneau
+          // de repos. Si le créneau est déjà partiellement rempli, on le termine ici.
+          if(slot.length) break;
+          slots.push([]);
+          continue;
+        }
+        safeCandidates.sort((a,b)=>a.score-b.score);
+        const chosen=safeCandidates[0];
+        slot.push(chosen.m); picked.add(chosen.m);
+        used.add(chosen.m.tA); used.add(chosen.m.tB);
       }
-      if(!candidates.length) break;
-      candidates.sort((a,b)=>a.score-b.score);
-      const chosen=candidates[0];
-      slot.push(chosen.m); picked.add(chosen.m);
-      used.add(chosen.m.tA); used.add(chosen.m.tB);
-      // Les autres candidats seront recalculés, car les équipes choisies ne sont plus disponibles.
+      if(!slot.length){
+        // Garde-fou : une donnée inattendue ne doit jamais bloquer la génération.
+        const m=remaining[0]; slot.push(m); picked.add(m);
+      }
+      const slotIndex=slots.length;
+      slot.forEach(m=>{lastPlayedAt.set(m.tA,slotIndex);lastPlayedAt.set(m.tB,slotIndex);});
+      slots.push(slot);
+      for(let i=remaining.length-1;i>=0;i--) if(picked.has(remaining[i])) remaining.splice(i,1);
     }
-    if(!slot.length){
-      // Garde-fou : même si une donnée inattendue est rencontrée, on progresse.
-      const m=remaining[0]; slot.push(m); picked.add(m);
+    let consecutive=0;
+    for(let si=0;si<slots.length;si++){
+      const played=new Set(slots[si].flatMap(m=>[m.tA,m.tB]));
+      const prev=si===0?playedImmediatelyBefore:new Set(slots[si-1].flatMap(m=>[m.tA,m.tB]));
+      for(const id of played) if(prev.has(id)) consecutive++;
     }
-    const slotIndex=slots.length;
-    slot.forEach(m=>{lastPlayedAt.set(m.tA,slotIndex);lastPlayedAt.set(m.tB,slotIndex);});
-    slots.push(slot);
-    for(let i=remaining.length-1;i>=0;i--) if(picked.has(remaining[i])) remaining.splice(i,1);
+    if(!bestSlots || consecutive<bestConsecutive || (consecutive===bestConsecutive && slots.length<bestSlots.length)){
+      bestSlots=slots; bestConsecutive=consecutive;
+    }
   }
-  return slots;
+  return bestSlots||[];
 }
 
 // Signature stable : permet de détecter un planning devenu obsolète après une
@@ -1321,7 +1343,7 @@ Corrigez le nombre d’équipes dans la configuration ou complétez la liste ava
   // terrains, les terrains libres sont immédiatement comblés par les
   // matchs du tour suivant (même salle).
   // ──────────────────────────────────────────────────────────
-  function buildSessionHalls(groups, toursCount){
+  function buildSessionHalls(groups, toursCount, initialPlayedTeams=new Set()){
     return groups.map((grp,gi)=>{
       const courts=courtsArr[gi]||8;
       const allMatches=[]; // {tA,tB,tourIdx}
@@ -1335,7 +1357,7 @@ Corrigez le nombre d’équipes dans la configuration ou complétez la liste ava
       }
       // Découper en créneaux pleins de `courts` matchs
       const slots=[];
-      slots.push(...packSlots(allMatches,courts));
+      slots.push(...packSlots(allMatches,courts,initialPlayedTeams));
       if(slots.length===0) slots.push([]);
       return { slots, byesByTour, label: numGroups>1?`Salle ${gi+1}`:'', teams:grp, courts };
     });
@@ -1363,8 +1385,10 @@ Corrigez le nombre d’équipes dans la configuration ou complétez la liste ava
       const restsAll=hallsOut.flatMap(h=>h.byes);
       const sortedTours=[...tourLabels].sort((a,b)=>a-b);
       let tourLabelStr;
-      if(sortedTours.length<=1){
-        tourLabelStr = `Tour ${(sortedTours[0]??0)+1}`;
+      if(sortedTours.length===0){
+        tourLabelStr = '⏸️ Repos programmé';
+      } else if(sortedTours.length===1){
+        tourLabelStr = `Tour ${sortedTours[0]+1}`;
       } else if(sortedTours.length===sortedTours[sortedTours.length-1]-sortedTours[0]+1){
         tourLabelStr = `Tours ${sortedTours[0]+1}→${sortedTours[sortedTours.length-1]+1}`;
       } else {
@@ -1391,7 +1415,12 @@ Corrigez le nombre d’équipes dans la configuration ou complétez la liste ava
   const afternoonStart = cfg.lunchBreak
     ? addMinutes(cfg.lunchStart,cfg.lunchDuration||60)
     : addMinutes(morningStart, morningEntries.length*(cfg.mt+cfg.tt));
-  const afternoonHallsData = buildSessionHalls(groupsAfternoon, cfg.matchesAfternoon);
+  // Sans pause déjeuner, la dernière vague du matin et la première de l'après-midi
+  // sont deux créneaux consécutifs : on évite de faire rejouer immédiatement ces équipes.
+  const lastMorningTeams = !cfg.lunchBreak && morningEntries.length
+    ? new Set(morningEntries[morningEntries.length-1].halls.flatMap(h=>(h.matches||[]).flatMap(m=>[m.tA,m.tB])))
+    : new Set();
+  const afternoonHallsData = buildSessionHalls(groupsAfternoon, cfg.matchesAfternoon, lastMorningTeams);
   const afternoonEntries = assembleEntries(afternoonHallsData, true, afternoonStart);
   schedule.push(...afternoonEntries);
 
@@ -1402,16 +1431,22 @@ Corrigez le nombre d’équipes dans la configuration ou complétez la liste ava
 
 // Contrôle après génération : bilan objectif du planning (ne modifie jamais les matchs).
 function auditSchedule(){
-  const teams=ST.teams.slice(0, (ST.cfg||getCfg()).n || ST.teams.length);
+  const cfg=ST.cfg||getCfg();
+  const teams=ST.teams.slice(0, cfg.n || ST.teams.length);
   const known=new Set(teams.map(t=>t.id));
-  const stats=new Map(teams.map(t=>[t.id,{id:t.id,name:t.name,matches:0,byes:0,opponents:{},lastSlot:-99,maxGap:0,streak:0,maxStreak:0}]));
-  const problems=[]; let totalMatches=0, totalByes=0;
+  const stats=new Map(teams.map(t=>[t.id,{id:t.id,name:t.name,matches:0,byes:0,opponents:{},lastSlot:-99,lastSession:null,maxGap:0,streak:0,maxStreak:0}]));
+  const problems=[], restWarnings=[]; let totalMatches=0, totalByes=0;
+  const duplicateIds=teams.map(t=>t.id).filter((id,i,arr)=>arr.indexOf(id)!==i);
+  if(duplicateIds.length) problems.push('Identifiant d’équipe en double : le planning ne peut pas être considéré comme fiable.');
+  let previousTime=null;
   ST.schedule.forEach((rd,ri)=>{
     const used=new Set();
+    if(previousTime && rd.roundTime && rd.roundTime<previousTime) problems.push(`Ordre horaire incohérent au créneau ${rd.roundTime}.`);
+    if(rd.roundTime) previousTime=rd.roundTime;
     (rd.halls||[]).forEach((h,hi)=>{
-      const capacity=((ST.cfg||getCfg())['t'+(hi+1)]) || (ST.cfg||getCfg()).t1 || 8;
-      if(h.matches.length>capacity) problems.push(`${rd.roundTime||'Créneau '+(ri+1)} · ${h.label||'Salle '+(hi+1)} : ${h.matches.length} matchs pour ${capacity} terrains.`);
-      h.matches.forEach(m=>{
+      const capacity=cfg['t'+(hi+1)] || cfg.t1 || 8;
+      if((h.matches||[]).length>capacity) problems.push(`${rd.roundTime||'Créneau '+(ri+1)} · ${h.label||'Salle '+(hi+1)} : ${h.matches.length} matchs pour ${capacity} terrains.`);
+      (h.matches||[]).forEach(m=>{
         totalMatches++;
         if(!known.has(m.tA)||!known.has(m.tB)){problems.push(`Match avec une équipe inconnue au créneau ${rd.roundTime||ri+1}.`);return;}
         if(m.tA===m.tB) problems.push(`Une équipe joue contre elle-même au créneau ${rd.roundTime||ri+1}.`);
@@ -1421,24 +1456,35 @@ function auditSchedule(){
           const st=stats.get(id); if(!st)return;
           st.matches++;
           if(st.lastSlot>=0) st.maxGap=Math.max(st.maxGap,ri-st.lastSlot-1);
-          st.streak=(st.lastSlot===ri-1)?st.streak+1:1;
+          const lunchSeparatesSessions=!!cfg.lunchBreak && st.lastSession!==null && st.lastSession!==rd.session;
+          const consecutive=st.lastSlot===ri-1 && !lunchSeparatesSessions;
+          if(consecutive){
+            const label=`${st.name} joue sur deux créneaux consécutifs (${ST.schedule[ri-1]?.roundTime||'créneau précédent'} et ${rd.roundTime||'créneau '+(ri+1)}).`;
+            if(!restWarnings.includes(label)) restWarnings.push(label);
+            st.streak=st.streak+1;
+          } else st.streak=1;
           st.maxStreak=Math.max(st.maxStreak,st.streak);
-          st.lastSlot=ri;
+          st.lastSlot=ri; st.lastSession=rd.session;
           const opp=j===0?m.tB:m.tA; st.opponents[opp]=(st.opponents[opp]||0)+1;
         });
       });
-      (h.byes||[]).forEach(id=>{const st=stats.get(id);if(st){st.byes++;totalByes++;}});
+      (h.byes||[]).forEach(id=>{
+        const st=stats.get(id);
+        if(st){st.byes++;totalByes++;}
+        else problems.push(`Exemption associée à une équipe inconnue au créneau ${rd.roundTime||ri+1}.`);
+      });
     });
   });
   const values=[...stats.values()];
   const counts=values.map(x=>x.matches);
   const min=counts.length?Math.min(...counts):0, max=counts.length?Math.max(...counts):0;
+  values.filter(x=>x.matches===0).forEach(x=>problems.push(`${x.name} ne joue aucun match.`));
   const repeats=[];
   values.forEach(st=>Object.entries(st.opponents).forEach(([opp,n])=>{
     if(n>1 && st.id.localeCompare(opp)<0) repeats.push({a:st.name,b:tName(opp),n});
   }));
   repeats.sort((a,b)=>b.n-a.n || a.a.localeCompare(b.a));
-  return {values,totalMatches,totalByes,min,max,problems,repeats};
+  return {values,totalMatches,totalByes,min,max,problems,restWarnings,repeats};
 }
 
 // ══════════════════════════════════════════════════════════
@@ -1483,9 +1529,11 @@ function renderGen(){
     const totalByes=Object.values(byeCount).reduce((s,v)=>s+v,0);
     const numTours = cfg.matchesMorning+cfg.matchesAfternoon;
     const numEntries = ST.schedule.length;
-    const toursLabel = numEntries===numTours
+    const restOnlyEntries=ST.schedule.filter(rd=>(rd.halls||[]).every(h=>!(h.matches||[]).length)).length;
+    const emptyHallSlots=ST.schedule.reduce((n,rd)=>n+(rd.halls||[]).filter(h=>!(h.matches||[]).length).length,0);
+    const toursLabel = numEntries===numTours && emptyHallSlots===0
       ? `<strong>${numTours} tours</strong>`
-      : `<strong>${numTours} tours</strong> sur <strong>${numEntries} créneaux</strong> (sous-vagues car salle(s) avec plus de matchs que de terrains)`;
+      : `<strong>${numTours} tours prévus</strong> répartis sur <strong>${numEntries} créneaux</strong>${restOnlyEntries?` · ${restOnlyEntries} créneau(x) de repos complet`:''}${emptyHallSlots?` · ${emptyHallSlots} salle(s)-créneau(x) sans match`:''}`;
     gib.className='info info-g';
     const isFresh=!!ST.scheduleMeta && ST.scheduleMeta===currentScheduleSignature(cfg,ST.teams);
     gib.className=isFresh?'info info-g':'info info-y';
@@ -1493,13 +1541,14 @@ function renderGen(){
     Matchs/équipe : <strong>${minPlay}–${maxPlay}</strong>${totalByes>0?` · ${totalByes} exemption(s)`:' · Toutes jouent'}<br>
     ${cfg.start} → ${endTime}${!isFresh?'<br>👉 Cliquez sur « Régénérer » avant de lancer le tournoi.':''}
     <details style="margin-top:10px;text-align:left;background:rgba(255,255,255,.65);border:1px solid var(--line);border-radius:8px;padding:8px 10px">
-      <summary style="cursor:pointer;font-weight:800">🔎 Contrôle du planning · ${audit.problems.length?'⚠️ '+audit.problems.length+' anomalie(s) structurelle(s)':'✅ aucune collision détectée'}</summary>
+      <summary style="cursor:pointer;font-weight:800">🔎 Contrôle du planning · ${audit.problems.length?'⚠️ '+audit.problems.length+' anomalie(s) structurelle(s)':'✅ aucune anomalie structurelle'}${audit.restWarnings.length?' · ⚠️ '+audit.restWarnings.length+' repos à vérifier':''}</summary>
       <div style="margin-top:8px;font-size:12px;line-height:1.6">
         <strong>Équité des matchs :</strong> ${audit.min} à ${audit.max} match(s) par équipe · ${audit.totalByes} exemption(s) affichée(s).<br>
         ${audit.problems.length?`<div style="color:var(--red);font-weight:700;margin-top:5px">${audit.problems.slice(0,8).map(x=>'• '+escHtml(x)).join('<br>')}${audit.problems.length>8?`<br>… et ${audit.problems.length-8} autre(s).`:''}</div>`:'<span style="color:var(--grn);font-weight:700">Aucune équipe n’est détectée deux fois sur le même créneau et aucune capacité de salle n’est dépassée.</span>'}
+        ${audit.restWarnings.length?`<div style="color:var(--red);font-weight:700;margin-top:7px"><strong>Repos d’un créneau non respecté :</strong><br>${audit.restWarnings.slice(0,10).map(x=>'• '+escHtml(x)).join('<br>')}${audit.restWarnings.length>10?`<br>… et ${audit.restWarnings.length-10} autre(s).`:''}</div>`:'<div style="margin-top:7px;color:var(--grn);font-weight:700">✅ Toutes les équipes ont au moins un créneau de repos entre deux matchs, hors pause déjeuner.</div>'}
         ${audit.repeats.length?`<div style="margin-top:7px"><strong>Adversaires rencontrés plusieurs fois :</strong><br>${audit.repeats.slice(0,8).map(x=>`${escHtml(x.a)} ↔ ${escHtml(x.b)} : ${x.n} fois`).join('<br>')}${audit.repeats.length>8?'<br>… autres répétitions.':''}</div>`:'<div style="margin-top:7px">Aucune répétition d’adversaire détectée.</div>'}
         <div style="margin-top:7px"><strong>Matchs et repos par équipe :</strong><br>${audit.values.map(x=>`${escHtml(x.name)} : ${x.matches} match(s), ${x.byes} exemption(s), série max. ${x.maxStreak} match(s) consécutif(s)`).join(' · ')}</div>
-        <div style="margin-top:6px;color:var(--muted)">Ce contrôle repère des anomalies visibles, mais ne garantit pas à lui seul une équité sportive parfaite. Les répétitions sont signalées pour vérification.</div>
+        <div style="margin-top:6px;color:var(--muted)">Le contrôle vérifie les collisions, les capacités des salles, les équipes inconnues ou sans match, les repos, les séries de matchs consécutifs et les adversaires répétés. Un repos manquant est signalé même si les contraintes du tournoi ne permettent pas toujours de l’éviter.</div>
       </div>
     </details>`;
   }
@@ -1509,11 +1558,12 @@ function renderGen(){
       <div class="round-hdr">
         <span class="round-hdr-ttl">${rd.waveLabel||'🎯 Vague '+(ri+1)}</span>
         <span class="round-time-badge">🕐 ${rd.roundTime}</span>
-        ${rd.subs.length?`<span class="sub-badge">🟡 Exempt: ${rd.subs.map(id=>tName(id)).join(', ')}</span>`:'<span style="font-size:11px;color:var(--grn);font-weight:700">✅ Tous jouent</span>'}
+        ${rd.subs.length?`<span class="sub-badge">🟡 Exempt: ${rd.subs.map(id=>tName(id)).join(', ')}</span>`:'<span style="font-size:11px;color:var(--grn);font-weight:700">✓ Sans exemption déclarée</span>'}
         <span style="font-size:11px;color:var(--muted);margin-left:auto">${halls.reduce((s,h)=>s+h.matches.length,0)} matchs</span>
       </div>
       ${halls.map(h=>`<div class="wave-block">
         ${h.label?`<div class="wave-hdr"><span>${h.label}</span></div>`:''}
+        ${!h.matches.length?'<div style="padding:8px 12px;font-size:12px;color:var(--muted);font-weight:700">⏸️ Repos programmé dans cette salle sur ce créneau.</div>':''}
         ${h.matches.map((m,mi)=>`<div class="rp-match">
           <span class="rp-court">T${mi+1}</span>
           <span class="rp-pair"><strong>${tName(m.tA)}</strong> <span style="font-size:10px;color:var(--muted)">${tClub(m.tA)}</span>${tPlayers(m.tA)?`<br><span style="font-size:10px;font-weight:400;color:var(--muted)">👤 ${tPlayers(m.tA)}</span>`:''}</span>
