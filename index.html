@@ -14,7 +14,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#f0f4fa">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏓</text></svg>">
-<title>🏓 Pickleball Interclub</title>
+<title>🏓 Pickleball Interclub — version améliorée</title>
 <link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@300;400;600;700;900&family=Oswald:wght@400;500;600;700&display=swap" rel="stylesheet">
 
 <!-- ══════════════════════════════════════════════════════════
@@ -1360,6 +1360,45 @@ Corrigez le nombre d’équipes dans la configuration ou complétez la liste ava
   return true;
 }
 
+// Contrôle après génération : bilan objectif du planning (ne modifie jamais les matchs).
+function auditSchedule(){
+  const teams=ST.teams.slice(0, (ST.cfg||getCfg()).n || ST.teams.length);
+  const known=new Set(teams.map(t=>t.id));
+  const stats=new Map(teams.map(t=>[t.id,{id:t.id,name:t.name,matches:0,byes:0,opponents:{},lastSlot:-99,maxGap:0}]));
+  const problems=[]; let totalMatches=0, totalByes=0;
+  ST.schedule.forEach((rd,ri)=>{
+    const used=new Set();
+    (rd.halls||[]).forEach((h,hi)=>{
+      const capacity=((ST.cfg||getCfg())['t'+(hi+1)]) || (ST.cfg||getCfg()).t1 || 8;
+      if(h.matches.length>capacity) problems.push(`${rd.roundTime||'Créneau '+(ri+1)} · ${h.label||'Salle '+(hi+1)} : ${h.matches.length} matchs pour ${capacity} terrains.`);
+      h.matches.forEach(m=>{
+        totalMatches++;
+        if(!known.has(m.tA)||!known.has(m.tB)){problems.push(`Match avec une équipe inconnue au créneau ${rd.roundTime||ri+1}.`);return;}
+        if(m.tA===m.tB) problems.push(`Une équipe joue contre elle-même au créneau ${rd.roundTime||ri+1}.`);
+        [m.tA,m.tB].forEach((id,j)=>{
+          if(used.has(id)) problems.push(`${tName(id)} apparaît plusieurs fois au créneau ${rd.roundTime||ri+1}.`);
+          used.add(id);
+          const st=stats.get(id); if(!st)return;
+          st.matches++;
+          if(st.lastSlot>=0) st.maxGap=Math.max(st.maxGap,ri-st.lastSlot-1);
+          st.lastSlot=ri;
+          const opp=j===0?m.tB:m.tA; st.opponents[opp]=(st.opponents[opp]||0)+1;
+        });
+      });
+      (h.byes||[]).forEach(id=>{const st=stats.get(id);if(st){st.byes++;totalByes++;}});
+    });
+  });
+  const values=[...stats.values()];
+  const counts=values.map(x=>x.matches);
+  const min=counts.length?Math.min(...counts):0, max=counts.length?Math.max(...counts):0;
+  const repeats=[];
+  values.forEach(st=>Object.entries(st.opponents).forEach(([opp,n])=>{
+    if(n>1 && st.id.localeCompare(opp)<0) repeats.push({a:st.name,b:tName(opp),n});
+  }));
+  repeats.sort((a,b)=>b.n-a.n || a.a.localeCompare(b.a));
+  return {values,totalMatches,totalByes,min,max,problems,repeats};
+}
+
 // ══════════════════════════════════════════════════════════
 // PAGE 3 — PLANNING PREVIEW
 // ══════════════════════════════════════════════════════════
@@ -1392,6 +1431,7 @@ function renderGen(){
   const totalMatchCount=ST.schedule.reduce((s,rd)=>s+rd.halls.reduce((s2,h)=>s2+h.matches.length,0),0);
   const lastRd=ST.schedule[ST.schedule.length-1];
   const endTime=addMinutes(lastRd.roundTime,cfg.mt);
+  const audit=auditSchedule();
   const gib=document.getElementById('genInfoBox');
   if(gib){
     const byeCount={}; ST.teams.slice(0,cfg.n).forEach(t=>byeCount[t.id]=0);
@@ -1409,7 +1449,17 @@ function renderGen(){
     gib.className=isFresh?'info info-g':'info info-y';
     gib.innerHTML=`${isFresh?'✅ Planning à jour':'⚠️ Planning à vérifier : paramètres ou équipes modifiés'}<br><strong>${ST.teams.slice(0,cfg.n).length} équipes</strong> · ${toursLabel} · <strong>${totalMatchCount} matchs</strong><br>
     Matchs/équipe : <strong>${minPlay}–${maxPlay}</strong>${totalByes>0?` · ${totalByes} exemption(s)`:' · Toutes jouent'}<br>
-    ${cfg.start} → ${endTime}${!isFresh?'<br>👉 Cliquez sur « Régénérer » avant de lancer le tournoi.':''}`;
+    ${cfg.start} → ${endTime}${!isFresh?'<br>👉 Cliquez sur « Régénérer » avant de lancer le tournoi.':''}
+    <details style="margin-top:10px;text-align:left;background:rgba(255,255,255,.65);border:1px solid var(--line);border-radius:8px;padding:8px 10px">
+      <summary style="cursor:pointer;font-weight:800">🔎 Contrôle du planning · ${audit.problems.length?'⚠️ '+audit.problems.length+' anomalie(s) structurelle(s)':'✅ aucune collision détectée'}</summary>
+      <div style="margin-top:8px;font-size:12px;line-height:1.6">
+        <strong>Équité des matchs :</strong> ${audit.min} à ${audit.max} match(s) par équipe · ${audit.totalByes} exemption(s) affichée(s).<br>
+        ${audit.problems.length?`<div style="color:var(--red);font-weight:700;margin-top:5px">${audit.problems.slice(0,8).map(x=>'• '+escHtml(x)).join('<br>')}${audit.problems.length>8?`<br>… et ${audit.problems.length-8} autre(s).`:''}</div>`:'<span style="color:var(--grn);font-weight:700">Aucune équipe n’est détectée deux fois sur le même créneau et aucune capacité de salle n’est dépassée.</span>'}
+        ${audit.repeats.length?`<div style="margin-top:7px"><strong>Adversaires rencontrés plusieurs fois :</strong><br>${audit.repeats.slice(0,8).map(x=>`${escHtml(x.a)} ↔ ${escHtml(x.b)} : ${x.n} fois`).join('<br>')}${audit.repeats.length>8?'<br>… autres répétitions.':''}</div>`:'<div style="margin-top:7px">Aucune répétition d’adversaire détectée.</div>'}
+        <div style="margin-top:7px"><strong>Matchs par équipe :</strong><br>${audit.values.map(x=>`${escHtml(x.name)} : ${x.matches} match(s), ${x.byes} exemption(s)`).join(' · ')}</div>
+        <div style="margin-top:6px;color:var(--muted)">Ce contrôle repère des anomalies visibles, mais ne garantit pas à lui seul une équité sportive parfaite. Les répétitions sont signalées pour vérification.</div>
+      </div>
+    </details>`;
   }
   function renderWaveBlock(rd,ri){
     const halls=rd.halls;
@@ -3670,6 +3720,13 @@ window.printAllTeamSchedules = function(){
     .fiche-bilan{margin-top:2px;font-size:9px;font-weight:700;color:#1a2540;text-align:right}
     @media print{
       @page{size:A4 portrait;margin:0}
+      .view:not(.on){display:none!important}
+      .view.on{display:block!important}
+      .sheet{width:210mm;height:297mm;margin:0;padding:4mm;box-shadow:none;overflow:hidden;break-after:page;page-break-after:always}
+      .sheet:last-child{break-after:auto;page-break-after:auto}
+      .slip table{table-layout:fixed}
+      .slip td,.slip th{overflow-wrap:anywhere}
+      .slip tr{break-inside:avoid;page-break-inside:avoid}
       html{-webkit-print-color-adjust:exact;print-color-adjust:exact}
       body{background:#fff}
       .noprint{display:none!important}
@@ -3691,7 +3748,9 @@ window.printAllTeamSchedules = function(){
         <option value="d">Ancien format dense (avec scores)</option>
       </select>
     </label>
-    <span style="font-size:11px;color:#666">Programme complet matin + après-midi · à découper selon les pointillés · cliquez sur « Imprimer » (barre du haut) · désactivez les en-têtes/pieds de page dans les options d'impression</span>
+    <button type="button" onclick="window.print()" style="background:#1a2540;color:#fff;border:0;border-radius:5px;padding:7px 13px;font-weight:700;cursor:pointer">🖨 Imprimer / PDF</button>
+    <button type="button" onclick="window.close()" style="border:1px solid #aaa;border-radius:5px;padding:7px 10px;cursor:pointer">Fermer</button>
+    <span style="font-size:11px;color:#666">Programme complet matin + après-midi · fiches à découper selon les pointillés. Dans la fenêtre d’impression, choisissez A4 portrait et désactivez les en-têtes/pieds de page.</span>
   </div>
   <div class="view" id="v2">${pages(2)}</div>
   <div class="view" id="v3">${pages(3)}</div>
