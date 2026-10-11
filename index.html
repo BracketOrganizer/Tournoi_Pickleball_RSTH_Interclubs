@@ -80,6 +80,7 @@ const ST = {
   page:1, prevPage:1, rulesOpen:false,
   teams:[],        // [{id, name, club, p1, p2, lv, hall}]
   schedule:[],     // rounds avec sessions matin/après-midi
+  scheduleMeta:null, // signature des équipes + paramètres utilisés pour générer le planning
   results:{},
   activeRound:0,
   liveOpen:false,
@@ -358,6 +359,7 @@ function subscribeToTournamentPublic(){
     if(data.cfg)      ST.cfg      = data.cfg;
     if(data.teams)    ST.teams    = data.teams;
     if(data.schedule) ST.schedule = data.schedule;
+    ST.scheduleMeta = data.scheduleMeta || null;
     if(data.activeRound!=null) ST.activeRound = data.activeRound;
     // (le chrono est maintenant dans son propre document interclub/timers)
     renderTimerPanel();
@@ -401,6 +403,7 @@ function subscribeToTournament(){
     if(data.cfg)      { ST.cfg = data.cfg; syncCfgForm(); }
     if(data.teams)    ST.teams    = data.teams;
     if(data.schedule) ST.schedule = data.schedule;
+    ST.scheduleMeta = data.scheduleMeta || null;
     if(data.activeRound!=null) ST.activeRound = data.activeRound;
     // (le chrono est maintenant dans son propre document interclub/timers)
     renderTimerPanel();
@@ -746,9 +749,10 @@ window.goTo = function(n){
   window.scrollTo(0,0);
   if(n===2) renderTeams();
   if(n===3){
-    // Ne régénérer automatiquement que si aucun planning n'existe encore
-    if(!ST.schedule.length){ if(buildSchedule()) renderGen(); else renderGen(); }
-    else renderGen();
+    // Génération automatique uniquement lorsque le nombre d'équipes correspond
+    // à la configuration ; sinon, afficher une explication sans interrompre la navigation.
+    if(!ST.schedule.length && ST.teams.length>=2 && ST.teams.length===getCfg().n){ buildSchedule(); }
+    renderGen();
   }
   if(n===4) renderTournament();
   if(n===5) renderFinal();
@@ -995,7 +999,8 @@ function syncCfgForm(){
 window.saveCfgAndNext = async function(){
   if(!isAdmin()) return;
   const cfg=getCfg(); ST.cfg=cfg;
-  await saveTournament({ cfg, status:'setup' });
+  const ok=await saveTournament({ cfg, status:'setup' });
+  if(!ok){ alert('La configuration n’a pas pu être enregistrée. Vérifiez la connexion puis réessayez.'); return; }
   goTo(2);
 };
 
@@ -1171,11 +1176,40 @@ function packSlots(allMatches,courts){
   return slots;
 }
 
+// Signature stable : permet de détecter un planning devenu obsolète après une
+// modification des paramètres, des équipes, des joueurs, des clubs ou des niveaux.
+function currentScheduleSignature(cfg=getCfg(), teams=ST.teams){
+  const cleanCfg={n:cfg.n,mt:cfg.mt,tt:cfg.tt,lunchBreak:cfg.lunchBreak,lunchDuration:cfg.lunchDuration,
+    start:cfg.start,lunchStart:cfg.lunchStart,bal:cfg.bal,matchesMorning:cfg.matchesMorning,
+    matchesAfternoon:cfg.matchesAfternoon,halls:cfg.halls,t1:cfg.t1,t2:cfg.t2,t3:cfg.t3,t4:cfg.t4,
+    hallMode:cfg.hallMode,targetMatchesPerTeam:cfg.targetMatchesPerTeam};
+  const cleanTeams=teams.map(t=>({id:t.id,name:t.name,club:t.club,p1:t.p1,p2:t.p2,lv:t.lv}));
+  return JSON.stringify({cfg:cleanCfg,teams:cleanTeams});
+}
+function validateTeamRoster(teams=ST.teams){
+  const playerOwners=new Map();
+  for(const t of teams){
+    const p1=normalizeName(t.p1), p2=normalizeName(t.p2);
+    if(!t.name?.trim() || !p1 || !p2) return `L’équipe « ${t.name||'(sans nom)'} » doit avoir un nom et deux joueurs.`;
+    if(p1===p2) return `Les deux joueurs de l’équipe « ${t.name} » semblent être la même personne.`;
+    for(const [player,other] of [[p1,t.p1],[p2,t.p2]]){
+      if(playerOwners.has(player)) return `Le joueur « ${other} » est déjà inscrit dans l’équipe « ${playerOwners.get(player)} ». Un joueur ne peut figurer que dans une seule équipe.`;
+      playerOwners.set(player,t.name);
+    }
+  }
+  return null;
+}
+
 function buildSchedule(){
   const cfg=getCfg();
   if(ST.teams.length<2){ alert('Il faut au moins 2 équipes.'); return false; }
+  if(ST.teams.length!==cfg.n){ alert(`La configuration prévoit ${cfg.n} équipes, mais ${ST.teams.length} sont inscrites.
+
+Corrigez le nombre d’équipes dans la configuration ou complétez la liste avant de générer le planning.`); return false; }
+  const rosterIssue=validateTeamRoster();
+  if(rosterIssue){ alert(rosterIssue); return false; }
   ST.cfg=cfg;
-  const N=Math.min(ST.teams.length,cfg.n);
+  const N=ST.teams.length;
   const allIds=ST.teams.slice(0,N).map(t=>t.id);
   const oppCount={}, playCount={}, byeCount={};
   allIds.forEach(id=>{ oppCount[id]={}; playCount[id]=0; byeCount[id]=0; });
@@ -1322,6 +1356,7 @@ function buildSchedule(){
   schedule.push(...afternoonEntries);
 
   ST.schedule=schedule; ST.results={}; ST.activeRound=0;
+  ST.scheduleMeta=currentScheduleSignature(cfg,ST.teams);
   return true;
 }
 
@@ -1333,7 +1368,17 @@ function renderGen(){
   const cfg=getCfg();
   const el=document.getElementById('schedPreview'); if(!el) return;
   if(!ST.schedule.length){
-    el.innerHTML='<div class="info info-y">Cliquez sur Régénérer pour créer le planning.</div>'; return;
+    const gib=document.getElementById('genInfoBox');
+    if(gib){
+      const cfgCount=getCfg().n;
+      gib.className='info info-y';
+      gib.innerHTML=ST.teams.length<2
+        ? '👥 Ajoutez au moins 2 équipes avant de générer le planning.'
+        : ST.teams.length!==cfgCount
+          ? `⚠️ La configuration prévoit <strong>${cfgCount} équipes</strong>, mais <strong>${ST.teams.length}</strong> sont inscrites. Ajustez la configuration ou la liste des équipes.`
+          : 'Cliquez sur « Régénérer » pour créer le planning.';
+    }
+    el.innerHTML='<div class="info info-y">Le planning apparaîtra ici une fois généré.</div>'; return;
   }
   const playCount={};
   ST.teams.slice(0,cfg.n).forEach(t=>playCount[t.id]=0);
@@ -1360,9 +1405,11 @@ function renderGen(){
       ? `<strong>${numTours} tours</strong>`
       : `<strong>${numTours} tours</strong> sur <strong>${numEntries} créneaux</strong> (sous-vagues car salle(s) avec plus de matchs que de terrains)`;
     gib.className='info info-g';
-    gib.innerHTML=`✅ <strong>${ST.teams.slice(0,cfg.n).length} équipes</strong> · ${toursLabel} · <strong>${totalMatchCount} matchs</strong><br>
+    const isFresh=!!ST.scheduleMeta && ST.scheduleMeta===currentScheduleSignature(cfg,ST.teams);
+    gib.className=isFresh?'info info-g':'info info-y';
+    gib.innerHTML=`${isFresh?'✅ Planning à jour':'⚠️ Planning à vérifier : paramètres ou équipes modifiés'}<br><strong>${ST.teams.slice(0,cfg.n).length} équipes</strong> · ${toursLabel} · <strong>${totalMatchCount} matchs</strong><br>
     Matchs/équipe : <strong>${minPlay}–${maxPlay}</strong>${totalByes>0?` · ${totalByes} exemption(s)`:' · Toutes jouent'}<br>
-    ${cfg.start} → ${endTime}`;
+    ${cfg.start} → ${endTime}${!isFresh?'<br>👉 Cliquez sur « Régénérer » avant de lancer le tournoi.':''}`;
   }
   function renderWaveBlock(rd,ri){
     const halls=rd.halls;
@@ -1595,8 +1642,11 @@ window.saveEditTeam = async function(){
   const p2   = document.getElementById('edit_t_p2').value.trim();
   const lv   = +document.getElementById('edit_t_lv').value || 3;
   if(!name||!p1||!p2){ alert('Nom, Joueur 1 et Joueur 2 sont obligatoires.'); return; }
+  const proposed=ST.teams.map(x=>x.id===id?{...x,name,club,p1,p2,lv}:x);
+  const rosterIssue=validateTeamRoster(proposed); if(rosterIssue){ alert(rosterIssue); return; }
   t.name=name; t.club=club; t.p1=p1; t.p2=p2; t.lv=lv;
-  await saveTournament({ teams: ST.teams });
+  const saved=await saveTournament({ teams: ST.teams });
+  if(!saved){ alert('Modification non enregistrée : vérifiez la connexion.'); return; }
   closeEditTeam();
   renderTeams();
   if(ST.schedule.length){ renderMatches(); renderMiniStandings(); renderRoundTabs(); }
@@ -1612,9 +1662,13 @@ window.addTeam = async function(){
   const p2    = document.getElementById('t_p2').value.trim();
   const lv    = +document.getElementById('t_lv').value || 3;
   if(!name||!p1||!p2){ alert('Nom, Joueur 1 et Joueur 2 sont obligatoires.'); return; }
+  if(ST.teams.length >= (+document.getElementById('cfg_n').value||32)){ alert('Le nombre d’équipes configuré est déjà atteint. Augmentez-le dans Configuration si nécessaire.'); return; }
+  const candidate={id:'validation',name,club,p1,p2,lv};
+  const rosterIssue=validateTeamRoster([...ST.teams,candidate]); if(rosterIssue){ alert(rosterIssue); return; }
   const id = 't_' + Date.now() + '_' + Math.random().toString(36).slice(2,6);
   ST.teams.push({ id, name, club, p1, p2, lv });
-  await saveTournament({ teams: ST.teams });
+  const saved=await saveTournament({ teams: ST.teams });
+  if(!saved){ ST.teams=ST.teams.filter(t=>t.id!==id); alert('Équipe non enregistrée : vérifiez la connexion puis réessayez.'); return; }
   ['t_name','t_club','t_p1','t_p2'].forEach(fid=>{ const el=document.getElementById(fid); if(el) el.value=''; });
   document.getElementById('t_lv').value='3';
   renderTeams();
@@ -1666,24 +1720,30 @@ window.autoFillTeams = async function(){
 window.regenerate = async function(){
   if(!isAdmin()) return;
   ST.schedule = []; // force rebuild
-  if(buildSchedule()){ await saveTournament({ schedule: ST.schedule, activeRound:0 }); renderGen(); }
+  if(buildSchedule()){ const ok=await saveTournament({ schedule: ST.schedule, scheduleMeta:ST.scheduleMeta, activeRound:0 }); if(!ok){ alert('Le planning est calculé mais n’a pas pu être enregistré. Vérifiez la connexion.'); return; } renderGen(); }
 };
 window.startTournament = async function(){
   if(!isAdmin()) return;
   if(!ST.schedule||ST.schedule.length===0){ if(!buildSchedule()) return; }
+  const expected=currentScheduleSignature(getCfg(),ST.teams);
+  if(!ST.scheduleMeta || ST.scheduleMeta!==expected){
+    alert(`Le planning est absent ou obsolète : les équipes ou les paramètres ont changé depuis sa création.\n\nCliquez sur « Régénérer » dans la page Planning, vérifiez le résultat, puis relancez le tournoi.`);
+    goTo(3); renderGen(); return;
+  }
   ST.results={}; ST.activeRound=0;
-  await saveTournament({ schedule: ST.schedule, activeRound:0, status:'active', results:{} });
+  const ok=await saveTournament({ schedule: ST.schedule, scheduleMeta:ST.scheduleMeta, activeRound:0, status:'active', results:{} });
+  if(!ok){ alert('Impossible de lancer le tournoi : les données n’ont pas été enregistrées. Vérifiez la connexion.'); return; }
   goTo(4);
 };
 window.newTournament = async function(){
   if(!isAdmin()){ alert('Admin uniquement.'); return; }
   if(!confirm('Nouveau tournoi ? Toutes les données seront perdues.')) return;
   clearInterval(ST.timerIv);
-  ST.teams=[]; ST.schedule=[]; ST.results={}; ST.activeRound=0;
+  ST.teams=[]; ST.schedule=[]; ST.scheduleMeta=null; ST.results={}; ST.activeRound=0;
   ST.timerSec=0; ST.timerRun=false; ST.rulesOpen=false;
   document.getElementById('ruleBtn').textContent='📋 Règlement';
   ST.timers = timersDefault();
-  await saveTournament({ cfg:ST.cfg, teams:[], schedule:[], activeRound:0, status:'setup' });
+  await saveTournament({ cfg:ST.cfg, teams:[], schedule:[], scheduleMeta:null, activeRound:0, status:'setup' });
   await saveTimers(ST.timers);
   renderTeams(); goTo(1); onCfgChange();
 };
@@ -3226,7 +3286,7 @@ window.printPlanning = function(){
       </div></div>`;
   });
   const win=_printWin('Planning');
-  win.document.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Planning Interclub</title><style>body{margin:16px;font-family:sans-serif;font-size:12px}@media print{.noprint{display:none}}</style></head><body>'+body+'<div class="noprint" style="margin-top:20px"><button onclick="window.print()">Imprimer</button></div></body></html>');
+  win.document.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Planning Interclub</title><style>@page{size:A4 portrait;margin:10mm}body{margin:0;font-family:Arial,sans-serif;font-size:11px;color:#111}.match-row{break-inside:avoid;page-break-inside:avoid}@media print{.noprint{display:none!important} .round-block{break-inside:avoid-page;page-break-inside:avoid} }</style></head><body>'+body+'<div class="noprint" style="margin-top:20px"><button onclick="window.print()">Imprimer</button></div></body></html>');
   win.document.close(); setTimeout(()=>win.print(),400);
 };
 window.printStandings = function(){
