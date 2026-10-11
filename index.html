@@ -14,7 +14,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#f0f4fa">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏓</text></svg>">
-<title>🏓 Pickleball Interclub — version améliorée</title>
+<title>🏓 Pickleball Interclub — planning optimisé</title>
 <link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@300;400;600;700;900&family=Oswald:wght@400;500;600;700&display=swap" rel="stylesheet">
 
 <!-- ══════════════════════════════════════════════════════════
@@ -853,7 +853,10 @@ function _effSlots(s,c,K){
 // Coût d'une répartition : 1) fin de session la plus tôt, 2) salles qui finissent ensemble,
 // 3) terrains remplis équitablement, 4) peu d'équipes exemptes
 function _hallsCost(sizes,courts,K){
-  const eff=sizes.map((s,i)=> s<2 ? 0 : Math.max(K, Math.floor(s/2)*K/courts[i]));
+  // Une salle avec 0 ou 1 équipe ne peut pas organiser de match : on l'exclut
+  // dès qu'une répartition valable est possible.
+  if(sizes.some(s=>s<2)) return Infinity;
+  const eff=sizes.map((s,i)=> Math.max(K, Math.floor(s/2)*K/courts[i]));
   const raw=sizes.map((s,i)=> Math.floor(s/2)*K/courts[i]);
   const mx=Math.max(...eff), mn=Math.min(...eff);
   const rmx=Math.max(...raw), rmn=Math.min(...raw);
@@ -1133,10 +1136,13 @@ function tClub(id){ const t=tObj(id); return t?t.club:''; }
 function tPlayers(id){ const t=tObj(id); return t&&(t.p1||t.p2)?[t.p1,t.p2].filter(Boolean).join(' & '):''; }
 
 function makeRoundMatches(active, maxCourts, oppCount){
+  // Un tour nominal doit faire jouer toutes les équipes possibles : la capacité
+  // des terrains est gérée ensuite par packSlots, pas ici.
   const maxMatches=Math.min(Math.floor(active.length/2), maxCourts);
   if(maxMatches===0||active.length<2) return [];
   let bestMatches=null, bestScore=Infinity;
-  for(let attempt=0;attempt<40;attempt++){
+  const attempts=Math.min(120,Math.max(40,active.length*3));
+  for(let attempt=0;attempt<attempts;attempt++){
     const pool=shuffle(active);
     const used=new Set();
     const matches=[];
@@ -1147,31 +1153,60 @@ function makeRoundMatches(active, maxCourts, oppCount){
       for(let j=0;j<pool.length;j++){
         const tB=pool[j]; if(tB===tA||used.has(tB)) continue;
         const opps=(oppCount[tA]||{})[tB]||0;
-        const sameClub=(tClub(tA)&&tClub(tB)&&tClub(tA)!=='—'&&tClub(tA)===tClub(tB))?10:0;
-        const sc=opps*5+sameClub+Math.random()*0.3;
+        const sameClub=(tClub(tA)&&tClub(tB)&&tClub(tA)!=='—'&&tClub(tB)===tClub(tA))?20:0;
+        // Éviter fortement les adversaires déjà rencontrés ; le club commun
+        // reste une pénalité secondaire, sans bloquer les appariements possibles.
+        const sc=opps*100+sameClub+Math.random()*0.25;
         if(sc<bestOppScore){ bestOppScore=sc; bestOpp=tB; }
       }
       if(bestOpp){ matches.push({tA,tB:bestOpp}); used.add(tA); used.add(bestOpp); score+=bestOppScore; }
     }
     if(matches.length>0&&score<bestScore){ bestScore=score; bestMatches=matches; }
-    if(bestMatches&&bestMatches.length===maxMatches&&bestScore<1) break;
+    if(bestMatches&&bestMatches.length===maxMatches&&bestScore<0.25) break;
   }
   return bestMatches||[];
 }
 
-// Découpe la liste des matchs d'une salle en créneaux de `courts` matchs max,
-// sans jamais mettre la même équipe deux fois dans un même créneau.
+// Répartit les matchs en créneaux physiques sans dépasser le nombre de terrains.
+// On peut compléter un créneau avec le tour suivant, mais on pénalise les équipes
+// qui ont déjà joué au créneau précédent (et, plus légèrement, deux créneaux avant).
+// Cela conserve une bonne occupation des terrains tout en limitant les matchs à la suite.
 function packSlots(allMatches,courts){
-  const remaining=[...allMatches], slots=[];
+  const remaining=[...allMatches], slots=[], lastPlayedAt=new Map();
+  const capacity=Math.max(1,Math.floor(+courts||1));
   while(remaining.length){
-    const used=new Set(), slot=[], firstTour=remaining[0].tourIdx;
-    for(let i=0;i<remaining.length && slot.length<courts;){
-      const m=remaining[i];
-      if(m.tourIdx>firstTour+1) break;
-      if(used.has(m.tA)||used.has(m.tB)){ i++; continue; }
-      slot.push(m); used.add(m.tA); used.add(m.tB); remaining.splice(i,1);
+    const firstTour=Math.min(...remaining.map(m=>m.tourIdx));
+    const slot=[], used=new Set(), picked=new Set();
+    while(slot.length<capacity){
+      const candidates=[];
+      for(let i=0;i<remaining.length;i++){
+        const m=remaining[i];
+        if(m.tourIdx>firstTour+1) continue;
+        if(used.has(m.tA)||used.has(m.tB)) continue;
+        const penalty=id=>{
+          const last=lastPlayedAt.get(id);
+          if(last===slots.length-1) return 8;
+          if(last===slots.length-2) return 2;
+          return 0;
+        };
+        const score=(m.tourIdx-firstTour)*25+penalty(m.tA)+penalty(m.tB)+Math.random()*0.2;
+        candidates.push({i,m,score});
+      }
+      if(!candidates.length) break;
+      candidates.sort((a,b)=>a.score-b.score);
+      const chosen=candidates[0];
+      slot.push(chosen.m); picked.add(chosen.m);
+      used.add(chosen.m.tA); used.add(chosen.m.tB);
+      // Les autres candidats seront recalculés, car les équipes choisies ne sont plus disponibles.
     }
+    if(!slot.length){
+      // Garde-fou : même si une donnée inattendue est rencontrée, on progresse.
+      const m=remaining[0]; slot.push(m); picked.add(m);
+    }
+    const slotIndex=slots.length;
+    slot.forEach(m=>{lastPlayedAt.set(m.tA,slotIndex);lastPlayedAt.set(m.tB,slotIndex);});
     slots.push(slot);
+    for(let i=remaining.length-1;i>=0;i--) if(picked.has(remaining[i])) remaining.splice(i,1);
   }
   return slots;
 }
@@ -1214,8 +1249,12 @@ Corrigez le nombre d’équipes dans la configuration ou complétez la liste ava
   const oppCount={}, playCount={}, byeCount={};
   allIds.forEach(id=>{ oppCount[id]={}; playCount[id]=0; byeCount[id]=0; });
 
-  const halls = cfg.halls||1;
-  const courtsArr = [cfg.t1||8, cfg.t2||cfg.t1||8, cfg.t3||cfg.t1||8, cfg.t4||cfg.t1||8].slice(0,halls);
+  const halls = Math.max(1,Math.min(4,+cfg.halls||1));
+  if(N < halls*2){
+    alert(`La configuration prévoit ${halls} salles, mais seulement ${N} équipes sont inscrites. Il faut au moins 2 équipes par salle. Réduisez le nombre de salles ou ajoutez des équipes avant de générer le planning.`);
+    return false;
+  }
+  const courtsArr = [cfg.t1||8, cfg.t2||cfg.t1||8, cfg.t3||cfg.t1||8, cfg.t4||cfg.t1||8].slice(0,halls).map(c=>Math.max(1,+c||1));
   const numGroups = _calcGroups(N, halls, cfg.t1||8, cfg.t2||cfg.t1||8, undefined, cfg.t3, cfg.t4).numGroups;
 
   // Effectifs de chaque salle, proportionnels à ses terrains → toutes les salles
@@ -1257,10 +1296,11 @@ Corrigez le nombre d’équipes dans la configuration ou complétez la liste ava
     const numRest=grp.length - maxMatches*2; // 0 ou 1
     let rest=[], active=[...grp];
     if(numRest>0){
+      const tieOrder=new Map(shuffle(grp).map((id,i)=>[id,i]));
       const sorted=[...grp].sort((a,b)=>
         ((byeCount[a]||0)-(byeCount[b]||0)) ||
         (playCount[b]-playCount[a]) ||
-        (Math.random()-.5)
+        (tieOrder.get(a)-tieOrder.get(b))
       );
       rest=sorted.slice(0,numRest);
       const restSet=new Set(rest);
@@ -1364,7 +1404,7 @@ Corrigez le nombre d’équipes dans la configuration ou complétez la liste ava
 function auditSchedule(){
   const teams=ST.teams.slice(0, (ST.cfg||getCfg()).n || ST.teams.length);
   const known=new Set(teams.map(t=>t.id));
-  const stats=new Map(teams.map(t=>[t.id,{id:t.id,name:t.name,matches:0,byes:0,opponents:{},lastSlot:-99,maxGap:0}]));
+  const stats=new Map(teams.map(t=>[t.id,{id:t.id,name:t.name,matches:0,byes:0,opponents:{},lastSlot:-99,maxGap:0,streak:0,maxStreak:0}]));
   const problems=[]; let totalMatches=0, totalByes=0;
   ST.schedule.forEach((rd,ri)=>{
     const used=new Set();
@@ -1381,6 +1421,8 @@ function auditSchedule(){
           const st=stats.get(id); if(!st)return;
           st.matches++;
           if(st.lastSlot>=0) st.maxGap=Math.max(st.maxGap,ri-st.lastSlot-1);
+          st.streak=(st.lastSlot===ri-1)?st.streak+1:1;
+          st.maxStreak=Math.max(st.maxStreak,st.streak);
           st.lastSlot=ri;
           const opp=j===0?m.tB:m.tA; st.opponents[opp]=(st.opponents[opp]||0)+1;
         });
@@ -1456,7 +1498,7 @@ function renderGen(){
         <strong>Équité des matchs :</strong> ${audit.min} à ${audit.max} match(s) par équipe · ${audit.totalByes} exemption(s) affichée(s).<br>
         ${audit.problems.length?`<div style="color:var(--red);font-weight:700;margin-top:5px">${audit.problems.slice(0,8).map(x=>'• '+escHtml(x)).join('<br>')}${audit.problems.length>8?`<br>… et ${audit.problems.length-8} autre(s).`:''}</div>`:'<span style="color:var(--grn);font-weight:700">Aucune équipe n’est détectée deux fois sur le même créneau et aucune capacité de salle n’est dépassée.</span>'}
         ${audit.repeats.length?`<div style="margin-top:7px"><strong>Adversaires rencontrés plusieurs fois :</strong><br>${audit.repeats.slice(0,8).map(x=>`${escHtml(x.a)} ↔ ${escHtml(x.b)} : ${x.n} fois`).join('<br>')}${audit.repeats.length>8?'<br>… autres répétitions.':''}</div>`:'<div style="margin-top:7px">Aucune répétition d’adversaire détectée.</div>'}
-        <div style="margin-top:7px"><strong>Matchs par équipe :</strong><br>${audit.values.map(x=>`${escHtml(x.name)} : ${x.matches} match(s), ${x.byes} exemption(s)`).join(' · ')}</div>
+        <div style="margin-top:7px"><strong>Matchs et repos par équipe :</strong><br>${audit.values.map(x=>`${escHtml(x.name)} : ${x.matches} match(s), ${x.byes} exemption(s), série max. ${x.maxStreak} match(s) consécutif(s)`).join(' · ')}</div>
         <div style="margin-top:6px;color:var(--muted)">Ce contrôle repère des anomalies visibles, mais ne garantit pas à lui seul une équité sportive parfaite. Les répétitions sont signalées pour vérification.</div>
       </div>
     </details>`;
