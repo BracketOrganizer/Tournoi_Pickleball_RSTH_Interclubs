@@ -318,7 +318,14 @@ function startLiveWatch(){
       if (document.hidden) return; // inutile quand l'écran est éteint ou l'onglet masqué
       try {
         const snap = await getDoc(doc(db,'interclub','status'));
-        if(snap.exists()) applyChronoMobileFlag(snap.data()); handleLiveOpenChange(snap.data().liveOpen === true);
+        if (snap.exists()) {
+          const data = snap.data();
+          applyChronoMobileFlag(data);
+          handleLiveOpenChange(data.liveOpen === true);
+        } else {
+          // Le document peut ne pas encore exister lors de la première ouverture.
+          handleLiveOpenChange(false);
+        }
       } catch(e){ console.warn('liveWatch poll error:', e); }
     }, 30000);
   }
@@ -333,7 +340,13 @@ document.addEventListener('visibilitychange', async ()=>{
   if(document.visibilityState !== 'visible') return;
   try {
     const snap = await getDoc(doc(db,'interclub','status'));
-    if(snap.exists()) applyChronoMobileFlag(snap.data()); handleLiveOpenChange(snap.data().liveOpen === true);
+    if (snap.exists()) {
+      const data = snap.data();
+      applyChronoMobileFlag(data);
+      handleLiveOpenChange(data.liveOpen === true);
+    } else {
+      handleLiveOpenChange(false);
+    }
   } catch(e){ console.warn('resync visibilitychange', e); }
 });
 
@@ -1943,13 +1956,19 @@ function getGlobalMatchIdxFromHallIdx(r, hallIdx, localMi){
   return offset+localMi;
 }
 
+// Échappe les valeurs provenant des noms/équipes avant leur insertion dans le HTML.
+function escHtml(value){
+  return String(value == null ? '' : value).replace(/[&<>\"']/g, ch => ({
+    '&':'&amp;', '<':'&lt;', '>':'&gt;', '\"':'&quot;', "'":'&#39;'
+  }[ch]));
+}
 function stblHTML(arr,limit){
   const med=['🥇','🥈','🥉'];
   const rows=(limit?arr.slice(0,limit):arr).map((s,i)=>{
     const gd=s.gf-s.ga;
     return `<tr><td class="rank-c" style="color:${i<3?'var(--grn)':'var(--dim)'}">${med[i]||i+1}</td>
-      <td><span style="font-weight:700">${s.name}</span>${s.club&&s.club!=='—'?` <span class="t-club-badge">${s.club}</span>`:''}${s.byeTours>0?` <span class="sub-badge" title="${s.byeTours} exemption(s)">🟡×${s.byeTours}</span>`:''}
-      <div style="font-size:11px;color:var(--muted)">${s.p1} · ${s.p2}</div></td>
+      <td><span style="font-weight:700">${escHtml(s.name)}</span>${s.club&&s.club!=='—'?` <span class="t-club-badge">${escHtml(s.club)}</span>`:''}${s.byeTours>0?` <span class="sub-badge" title="${Number(s.byeTours)||0} exemption(s)">🟡×${Number(s.byeTours)||0}</span>`:''}
+      <div style="font-size:11px;color:var(--muted)">${escHtml(s.p1)} · ${escHtml(s.p2)}</div></td>
       <td class="played-c">${s.played}</td><td class="wc">${s.w}</td><td class="dc">${s.d}</td><td class="lc">${s.l}</td>
       <td>${s.gf}</td><td>${s.ga}</td><td class="${gd>=0?'gdp':'gdn'}">${gd>0?'+':''}${gd}</td><td class="pts-c">${s.pts}</td></tr>`;
   }).join('');
@@ -1967,9 +1986,9 @@ function renderFinal(){
   if(pod) pod.innerHTML=st.slice(0,3).map((s,i)=>`
     <div class="pod ${med[i].cls}">
       <div class="pod-ico">${med[i].ico}</div>
-      <div class="pod-nm">${s.name}</div>
-      <div class="pod-detail">${s.club!=='—'?s.club:''}</div>
-      <div style="font-size:12px;color:var(--muted);margin-bottom:8px">${s.p1} · ${s.p2}</div>
+      <div class="pod-nm">${escHtml(s.name)}</div>
+      <div class="pod-detail">${s.club!=='—'?escHtml(s.club):''}</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:8px">${escHtml(s.p1)} · ${escHtml(s.p2)}</div>
       <div class="pod-pts">${s.pts} pts</div>
       <div class="pod-rec">${s.w}V · ${s.d}N · ${s.l}D · ${s.gf}/${s.ga}</div>
     </div>`).join('');
@@ -3505,10 +3524,10 @@ function _teamSlipHtml(tid){
   const pm=rows.filter(r=>r.session!=='morning');
   const hallsOf=a=>[...new Set(a.map(r=>r.hall).filter(Boolean))].join(' puis ');
   const rowHtml=r=>{
-    if(r.type==='bye') return `<tr class="bye"><td class="t">${r.time}</td><td class="c">—</td><td>🟡 Exempt (repos)</td></tr>`;
+    if(r.type==='bye') return `<tr class="bye"><td class="t">${escHtml(r.time)}</td><td class="c">—</td><td>🟡 Exempt (repos)</td></tr>`;
     const o=tObj(r.opp);
-    const club=o&&o.club&&o.club!=='—'?` <span class="cl">${o.club}</span>`:'';
-    return `<tr><td class="t">${r.time}</td><td class="c">${r.hall?r.hall+' · ':''}${r.court}</td><td><strong>${o?o.name:r.opp}</strong>${club}${o?`<br><span class="pl">👤 ${o.p1} &amp; ${o.p2}</span>`:''}</td></tr>`;
+    const club=o&&o.club&&o.club!=='—'?` <span class="cl">${escHtml(o.club)}</span>`:'';
+    return `<tr><td class="t">${escHtml(r.time)}</td><td class="c">${r.hall?escHtml(r.hall)+' · ':''}${escHtml(r.court)}</td><td><strong>${escHtml(o?o.name:r.opp)}</strong>${club}${o?`<br><span class="pl">👤 ${escHtml(o.p1)} &amp; ${escHtml(o.p2)}</span>`:''}</td></tr>`;
   };
   const secHdr=(ico,lbl,a)=>{ const h=multi?hallsOf(a):''; return `<tr class="sec"><td colspan="3">${ico} ${lbl}${h?' — '+h:''}</td></tr>`; };
   let body=secHdr('☀️','MATIN',am)+am.map(rowHtml).join('');
@@ -3517,10 +3536,10 @@ function _teamSlipHtml(tid){
     body+=`<tr class="lunch"><td colspan="3">🍽️ Déjeuner ${ls} → ${addMinutes(ls,cfg.lunchDuration||60)}</td></tr>`;
   }
   body+=secHdr('🌤️','APRÈS-MIDI',pm)+pm.map(rowHtml).join('');
-  const clubBadge=team.club&&team.club!=='—'?`<span class="badge">${team.club}</span>`:'';
+  const clubBadge=team.club&&team.club!=='—'?`<span class="badge">${escHtml(team.club)}</span>`:'';
   return `<div class="slip">
-    <div class="slip-hdr"><span>🏓 ${team.name} ${clubBadge}</span></div>
-    <div class="slip-pl">👤 ${team.p1} &amp; ${team.p2}</div>
+    <div class="slip-hdr"><span>🏓 ${escHtml(team.name)} ${clubBadge}</span></div>
+    <div class="slip-pl">👤 ${escHtml(team.p1)} &amp; ${escHtml(team.p2)}</div>
     <table><thead><tr><th>Heure</th><th>${multi?'Salle · Terrain':'Terrain'}</th><th>Adversaire</th></tr></thead><tbody>${body}</tbody></table>
     <div class="slip-ft">Matchs de ${cfg.mt||15} min</div>
   </div>`;
