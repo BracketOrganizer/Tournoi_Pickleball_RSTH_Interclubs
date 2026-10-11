@@ -294,19 +294,31 @@ function handleLiveOpenChange(nowOpen){
   }
 }
 
+// ── Interrupteur admin « Chrono visible sur les mobiles » ───────────────
+// Réglage stocké dans le document de statut Live (déjà écouté par tous : aucune lecture en plus).
+// Décoché : les spectateurs (mobiles) n'écoutent plus le chrono du tout (0 lecture) ;
+// il reste actif pour l'admin / scorer et sur l'écran TV.
+var CHRONO_MOBILE = true, CHRONO_STATUS_KNOWN = false;
+function applyChronoMobileFlag(d) {
+  CHRONO_MOBILE = !d || d.chronoMobile !== false;
+  CHRONO_STATUS_KNOWN = true;
+  const t = document.getElementById('chronoMobileToggle'); if (t) t.checked = CHRONO_MOBILE;
+  try { reconcileChrono(); } catch (e) { /* pas encore initialisé */ }
+}
+
 // ── startLiveWatch : listener + polling sur interclub/status ─────────────
 function startLiveWatch(){
   if(unsubLiveWatch) return;
   unsubLiveWatch = onSnapshot(doc(db,'interclub','status'), (snap)=>{
     if(!snap.exists()) return;
-    handleLiveOpenChange(snap.data().liveOpen === true);
+    applyChronoMobileFlag(snap.data()); handleLiveOpenChange(snap.data().liveOpen === true);
   }, (e)=>{ console.warn('startLiveWatch', e); });
   if(!liveWatchIv){
     liveWatchIv = setInterval(async ()=>{
       if (document.hidden) return; // inutile quand l'écran est éteint ou l'onglet masqué
       try {
         const snap = await getDoc(doc(db,'interclub','status'));
-        if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
+        if(snap.exists()) applyChronoMobileFlag(snap.data()); handleLiveOpenChange(snap.data().liveOpen === true);
       } catch(e){ console.warn('liveWatch poll error:', e); }
     }, 30000);
   }
@@ -321,7 +333,7 @@ document.addEventListener('visibilitychange', async ()=>{
   if(document.visibilityState !== 'visible') return;
   try {
     const snap = await getDoc(doc(db,'interclub','status'));
-    if(snap.exists()) handleLiveOpenChange(snap.data().liveOpen === true);
+    if(snap.exists()) applyChronoMobileFlag(snap.data()); handleLiveOpenChange(snap.data().liveOpen === true);
   } catch(e){ console.warn('resync visibilitychange', e); }
 });
 
@@ -334,7 +346,7 @@ function subscribeToTournamentPublic(){
     if(data.teams)    ST.teams    = data.teams;
     if(data.schedule) ST.schedule = data.schedule;
     if(data.activeRound!=null) ST.activeRound = data.activeRound;
-    if(data.timers) ST.timers = data.timers;
+    // (le chrono est maintenant dans son propre document interclub/timers)
     renderTimerPanel();
     handleLiveOpenChange(data.liveOpen === true);
     if(ST.page===4) renderTournament();
@@ -377,7 +389,7 @@ function subscribeToTournament(){
     if(data.teams)    ST.teams    = data.teams;
     if(data.schedule) ST.schedule = data.schedule;
     if(data.activeRound!=null) ST.activeRound = data.activeRound;
-    if(data.timers) ST.timers = data.timers;
+    // (le chrono est maintenant dans son propre document interclub/timers)
     renderTimerPanel();
     handleLiveOpenChange(data.liveOpen === true);
     if(ST.page===2) renderTeams();
@@ -1658,7 +1670,8 @@ window.newTournament = async function(){
   ST.timerSec=0; ST.timerRun=false; ST.rulesOpen=false;
   document.getElementById('ruleBtn').textContent='📋 Règlement';
   ST.timers = timersDefault();
-  await saveTournament({ cfg:ST.cfg, teams:[], schedule:[], activeRound:0, status:'setup', timers:ST.timers });
+  await saveTournament({ cfg:ST.cfg, teams:[], schedule:[], activeRound:0, status:'setup' });
+  await saveTimers(ST.timers);
   renderTeams(); goTo(1); onCfgChange();
 };
 window.resetAllScores = async function(){
@@ -2862,7 +2875,7 @@ window.goToLive = function(){
 // ══════════════════════════════════════════════════════════
 function fmt(s){ return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0'); }
 
-// Chrono PARTAGÉ : l'état est stocké dans interclub/current.timers (lu en temps réel par
+// Chrono PARTAGÉ : l'état est stocké dans interclub/timers (lu en temps réel par
 // admin, scorer, spectateurs et écran). Admin et scorer commandent le chrono ; les autres ne font que regarder.
 // État d'une salle : { state:'idle'|'running'|'paused', mode:'match'|'trans', rem:<ms restantes
 // au moment 'at'>, at:<serverNow() du démarrage> }. Chaque appareil calcule lui-même le temps
@@ -3015,7 +3028,7 @@ async function timerWrite(keys, mk){
   const patch={};
   keys.forEach(k=>{ ST.timers[k]=mk(ST.timers[k]||timerIdle(), k); patch[k]=ST.timers[k]; });
   renderTimerPanel();
-  const ok = await saveTournament({ timers: patch });
+  const ok = await saveTimers(patch);
   if(ok===false) alert("Chrono : enregistrement refusé (droits Firestore ou connexion). Vérifiez que votre rôle est bien admin ou scorer.");
 }
 window.timerStart = function(mode, grp){
@@ -3047,7 +3060,7 @@ window.timerSetLinked = async function(on){
     timerHallKeys().forEach(k=>{ ST.timers[k]={...base}; patch[k]=ST.timers[k]; });
   }
   renderTimerPanel();
-  await saveTournament({ timers: patch });
+  await saveTimers(patch);
 };
 
 // Son du chrono sur l'écran TV : activé / coupé pour tous les écrans TV (réglage partagé, admin + scorer)
@@ -3057,8 +3070,39 @@ window.toggleTvSound = async function(){
   const on = !(ST.timers.tvSound===false);
   ST.timers.tvSound = !on;
   renderTimerPanel();
-  const ok = await saveTournament({ timers: { tvSound: !on } });
+  const ok = await saveTimers({ tvSound: !on });
   if(ok===false) alert("Son TV : enregistrement refusé (droits Firestore ou connexion).");
+};
+
+// ── Chrono dans son propre petit document (interclub/timers) ──
+// Séparé du gros document du tournoi : une action de chrono ne le renvoie plus aux spectateurs,
+// et l'interrupteur admin « Chrono visible sur les mobiles » peut couper totalement ces lectures.
+// Règle Firestore requise : interclub/timers -> lecture publique, écriture admin / scorer.
+let unsubTimersDoc = null, timersRetryAt = 0;
+function chronoWanted(){ return isScorer() || ST.page==='TV' || (CHRONO_STATUS_KNOWN && CHRONO_MOBILE); }
+async function saveTimers(patch){
+  try { await setDoc(doc(db,'interclub','timers'), patch, { merge:true }); return true; }
+  catch(e){ console.error('saveTimers error:', e); return false; }
+}
+function reconcileChrono(){
+  const want = chronoWanted();
+  if(want && !unsubTimersDoc && Date.now() >= timersRetryAt){
+    unsubTimersDoc = onSnapshot(doc(db,'interclub','timers'), (snap)=>{
+      if(snap.exists()) ST.timers = snap.data();
+      renderTimerPanel();
+    }, (e)=>{ console.warn('timers watch', e); unsubTimersDoc = null; timersRetryAt = Date.now() + 8000; });
+  }
+  if(!want && unsubTimersDoc){ try{ unsubTimersDoc(); }catch(e){} unsubTimersDoc = null; }
+  const wrap = document.getElementById('timerWrap');
+  if(wrap){ const d = want ? '' : 'none'; if(wrap.style.display !== d) wrap.style.display = d; }
+}
+setInterval(reconcileChrono, 1000);
+window.toggleChronoMobile = async function () {
+  if (!isAdmin()) return;
+  const t = document.getElementById('chronoMobileToggle');
+  const on = !!(t && t.checked);
+  try { await setDoc(doc(db,'interclub','status'), { chronoMobile: on }, { merge: true }); }
+  catch (e) { if (t) t.checked = CHRONO_MOBILE; alert('Erreur : ' + (e && e.message ? e.message : e)); }
 };
 
 // Horloge commune à tous les appareils (voir estimateClockOffset ci-dessous)
@@ -4600,6 +4644,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
     <div class="timer-clocks" id="timerClocks"></div>
     <div class="timer-btns">
       <div class="timer-ctl" id="timerCtl"></div>
+      <label data-role="admin" style="display:none;font-size:12px;cursor:pointer" title="Décoché : aucune lecture du chrono pour les spectateurs ; il reste sur l'écran TV"><input type="checkbox" id="chronoMobileToggle" checked onchange="toggleChronoMobile()"> 📱 Chrono visible sur les mobiles</label>
       <button class="btn btn-ghost btn-sm" id="tvSoundToggle" data-role="scorer" style="display:none" onclick="toggleTvSound()" title="Son du chrono sur l'écran TV">📺🔊 Son TV</button>
       <label class="timer-snd-lbl">🔔 Sonnerie sur cet appareil : <select id="soundSel" onchange="timerSetSound(this.value)"></select></label>
     </div>
