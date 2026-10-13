@@ -14,7 +14,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#f0f4fa">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏓</text></svg>">
-<title>🏓 Pickleball Interclub — planning optimisé</title>
+<title>🏓 Pickleball Interclub</title>
 <link href="https://fonts.googleapis.com/css2?family=Exo+2:wght@300;400;600;700;900&family=Oswald:wght@400;500;600;700&display=swap" rel="stylesheet">
 
 <!-- ══════════════════════════════════════════════════════════
@@ -80,7 +80,6 @@ const ST = {
   page:1, prevPage:1, rulesOpen:false,
   teams:[],        // [{id, name, club, p1, p2, lv, hall}]
   schedule:[],     // rounds avec sessions matin/après-midi
-  scheduleMeta:null, // signature des équipes + paramètres utilisés pour générer le planning
   results:{},
   activeRound:0,
   liveOpen:false,
@@ -319,14 +318,7 @@ function startLiveWatch(){
       if (document.hidden) return; // inutile quand l'écran est éteint ou l'onglet masqué
       try {
         const snap = await getDoc(doc(db,'interclub','status'));
-        if (snap.exists()) {
-          const data = snap.data();
-          applyChronoMobileFlag(data);
-          handleLiveOpenChange(data.liveOpen === true);
-        } else {
-          // Le document peut ne pas encore exister lors de la première ouverture.
-          handleLiveOpenChange(false);
-        }
+        if(snap.exists()) applyChronoMobileFlag(snap.data()); handleLiveOpenChange(snap.data().liveOpen === true);
       } catch(e){ console.warn('liveWatch poll error:', e); }
     }, 30000);
   }
@@ -341,13 +333,7 @@ document.addEventListener('visibilitychange', async ()=>{
   if(document.visibilityState !== 'visible') return;
   try {
     const snap = await getDoc(doc(db,'interclub','status'));
-    if (snap.exists()) {
-      const data = snap.data();
-      applyChronoMobileFlag(data);
-      handleLiveOpenChange(data.liveOpen === true);
-    } else {
-      handleLiveOpenChange(false);
-    }
+    if(snap.exists()) applyChronoMobileFlag(snap.data()); handleLiveOpenChange(snap.data().liveOpen === true);
   } catch(e){ console.warn('resync visibilitychange', e); }
 });
 
@@ -359,7 +345,6 @@ function subscribeToTournamentPublic(){
     if(data.cfg)      ST.cfg      = data.cfg;
     if(data.teams)    ST.teams    = data.teams;
     if(data.schedule) ST.schedule = data.schedule;
-    ST.scheduleMeta = data.scheduleMeta || null;
     if(data.activeRound!=null) ST.activeRound = data.activeRound;
     // (le chrono est maintenant dans son propre document interclub/timers)
     renderTimerPanel();
@@ -403,7 +388,6 @@ function subscribeToTournament(){
     if(data.cfg)      { ST.cfg = data.cfg; syncCfgForm(); }
     if(data.teams)    ST.teams    = data.teams;
     if(data.schedule) ST.schedule = data.schedule;
-    ST.scheduleMeta = data.scheduleMeta || null;
     if(data.activeRound!=null) ST.activeRound = data.activeRound;
     // (le chrono est maintenant dans son propre document interclub/timers)
     renderTimerPanel();
@@ -749,10 +733,9 @@ window.goTo = function(n){
   window.scrollTo(0,0);
   if(n===2) renderTeams();
   if(n===3){
-    // Génération automatique uniquement lorsque le nombre d'équipes correspond
-    // à la configuration ; sinon, afficher une explication sans interrompre la navigation.
-    if(!ST.schedule.length && ST.teams.length>=2 && ST.teams.length===getCfg().n){ buildSchedule(); }
-    renderGen();
+    // Ne régénérer automatiquement que si aucun planning n'existe encore
+    if(!ST.schedule.length){ if(buildSchedule()) renderGen(); else renderGen(); }
+    else renderGen();
   }
   if(n===4) renderTournament();
   if(n===5) renderFinal();
@@ -844,24 +827,34 @@ function _courtsArr(numHalls,t1,t2,t3,t4){
   const c3 = t3!=null ? +t3 : dom('cfg_t3'), c4 = t4!=null ? +t4 : dom('cfg_t4');
   return [t1,t2,(c3>0?c3:t1),(c4>0?c4:t1)].slice(0,Math.max(1,numHalls||1)).map(c=>Math.max(1,+c||1));
 }
-// Nb de créneaux horaires nécessaires à une salle de `s` équipes, `c` terrains, `K` tours
-function _effSlots(s,c,K){
-  if(s<2) return 0;
-  const m=Math.floor(s/2);
-  return m<=c ? K : Math.ceil(m*K/c-1e-9);
+// Plan d'une salle de `s` équipes, `c` terrains, `K` matchs visés par équipe.
+// Principe : à CHAQUE créneau on remplit tous les terrains (m = min(c, s/2) matchs).
+//  - S = nb de créneaux. On prend le nombre qui remplit les terrains ; si ça ne tombe pas juste,
+//    quelques équipes (au plus ~1/3 de la salle) jouent 1 match de moins (= exemption, +2 pts / 0-0),
+//    sinon on ajoute un créneau (dernier créneau partiellement rempli, personne ne joue moins).
+//  - missing = nb d'équipes qui joueront K-1 matchs ; free = terrains libres cumulés sur la session.
+let _fillRatio=1/3; // part max. d'équipes d'une salle autorisée à jouer 1 match de moins (0 = jamais, 1 = tant qu'il faut pour remplir les terrains)
+function _setFill(mode){ _fillRatio = mode==='full' ? 1 : mode==='exact' ? 0 : 1/3; }
+function _hallPlan(s,c,K){
+  if(s<2||K<1) return {m:0,S:0,missing:0,matches:0,free:0};
+  const m=Math.min(c,Math.floor(s/2)), cap=2*m, need=s*K;
+  const lo=Math.floor(need/cap), hi=Math.ceil(need/cap);
+  let S=hi;
+  if(lo!==hi && lo>=1 && (need-cap*lo)<=Math.max(1,Math.floor(s*_fillRatio))) S=lo;
+  const missing=Math.max(need-cap*S, need%2);
+  const matches=(need-missing)/2;
+  return {m,S,missing,matches,free:Math.max(0,S*c-matches)};
 }
+// Nb de créneaux horaires nécessaires à une salle
+function _effSlots(s,c,K){ return _hallPlan(s,c,K).S; }
 // Coût d'une répartition : 1) fin de session la plus tôt, 2) salles qui finissent ensemble,
-// 3) terrains remplis équitablement, 4) peu d'équipes exemptes
+// 3) peu de terrains libres, 4) peu d'équipes qui jouent 1 match de moins
 function _hallsCost(sizes,courts,K){
-  // Une salle avec 0 ou 1 équipe ne peut pas organiser de match : on l'exclut
-  // dès qu'une répartition valable est possible.
-  if(sizes.some(s=>s<2)) return Infinity;
-  const eff=sizes.map((s,i)=> Math.max(K, Math.floor(s/2)*K/courts[i]));
-  const raw=sizes.map((s,i)=> Math.floor(s/2)*K/courts[i]);
-  const mx=Math.max(...eff), mn=Math.min(...eff);
-  const rmx=Math.max(...raw), rmn=Math.min(...raw);
-  const odd=sizes.filter(s=>s%2===1).length;
-  return Math.ceil(mx-1e-9)*1000 + (mx-mn)*100 + (rmx-rmn)*10 + odd*5;
+  const pl=sizes.map((s,i)=>_hallPlan(s,courts[i],K));
+  const S=pl.map(p=>p.S);
+  const mx=Math.max(...S), mn=Math.min(...S);
+  const free=pl.reduce((a,p)=>a+p.free,0), miss=pl.reduce((a,p)=>a+p.missing,0);
+  return mx*1000 + (mx-mn)*300 + free*10 + miss*6;
 }
 // Meilleure répartition de N équipes ; Ks = liste des nb de tours à optimiser ensemble
 function _bestSizes(N,courts,Ks){
@@ -929,6 +922,7 @@ function _calcAutoWaves(n, numHalls, t1, t2, targetMatches){
 }
 
 function getCfg(){
+  _setFill(document.getElementById('cfg_fill')?.value || 'auto');
   const n       = +document.getElementById('cfg_n').value || 32;
   const halls   = +(document.getElementById('cfg_halls')?.value||1);
   const t1      = +(document.getElementById('cfg_t1')?.value||8);
@@ -959,6 +953,7 @@ function getCfg(){
     matchesAfternoon: afternoon,
     halls, t1, t2, t3, t4,
     hallMode: document.getElementById('cfg_hallmode')?.value || 'mix',
+    fillMode: document.getElementById('cfg_fill')?.value || 'auto',
     targetMatchesPerTeam,
   };
 }
@@ -987,6 +982,7 @@ function syncCfgForm(){
   const t4row = document.getElementById('cfg_t4_row'); if(t4row) t4row.style.display = halls>=4 ? '' : 'none';
   setV('cfg_matches_per_team', c.targetMatchesPerTeam||5);
   setV('cfg_hallmode', c.hallMode||'mix');
+  setV('cfg_fill', c.fillMode||'auto');
   // Mode manuel si cfg a des comptes différents du calcul auto
   const hasMorning   = c.matchesMorning   != null;
   const auto = _calcAutoWaves(c.n||32, halls, t1, t2, c.targetMatchesPerTeam||5);
@@ -1002,12 +998,12 @@ function syncCfgForm(){
 window.saveCfgAndNext = async function(){
   if(!isAdmin()) return;
   const cfg=getCfg(); ST.cfg=cfg;
-  const ok=await saveTournament({ cfg, status:'setup' });
-  if(!ok){ alert('La configuration n’a pas pu être enregistrée. Vérifiez la connexion puis réessayez.'); return; }
+  await saveTournament({ cfg, status:'setup' });
   goTo(2);
 };
 
 window.onCfgChange = function(){
+  _setFill(document.getElementById('cfg_fill')?.value || 'auto');
   // Afficher/masquer inputs vagues manuels
   const wMode   = document.getElementById('cfg_wave_mode')?.value || 'auto';
   const mRow    = document.getElementById('cfg_morning_row');
@@ -1062,6 +1058,9 @@ window.onCfgChange = function(){
   const hallMode  = document.getElementById('cfg_hallmode')?.value || 'mix';
   const plan  = _planHallSizes(n, courtsArr, morning, afternoon, hallMode, lunchCk);
   const slAM  = plan.am.map((s,i)=>_effSlots(s,courtsArr[i],morning));
+  const _sum=(sz,K,key)=>sz.reduce((a,s,i)=>a+_hallPlan(s,courtsArr[i],K)[key],0);
+  const missAM=_sum(plan.am,morning,'missing'), missPM=_sum(plan.pm,afternoon,'missing');
+  const freeAM=_sum(plan.am,morning,'free'),    freePM=_sum(plan.pm,afternoon,'free');
   const slPM  = plan.pm.map((s,i)=>_effSlots(s,courtsArr[i],afternoon));
   const maxSlAM = Math.max(1,...slAM), maxSlPM = Math.max(1,...slPM);
 
@@ -1069,7 +1068,7 @@ window.onCfgChange = function(){
   const infoEl = document.getElementById('wave_auto_info');
   if(infoEl){
     const totalWaves = morning + afternoon;
-    const odd = Math.max(plan.am.filter(s=>s%2===1).length, plan.pm.filter(s=>s%2===1).length);
+    const odd = missAM+missPM;
     infoEl.style.display = '';
     infoEl.className = odd>0 ? 'info info-y' : 'info info-b';
     const hallsTxt=(sizes,sl)=>sizes.map((s,i)=>`Salle ${i+1} : <strong>${s}</strong> équipes · ${courtsArr[i]} terrains · ${sl[i]} créneaux`).join(' &nbsp;|&nbsp; ');
@@ -1086,10 +1085,13 @@ window.onCfgChange = function(){
       html += `<br>🏟️ <strong>1 salle</strong> · ${t1} terrains (${Math.floor(n/2)} matchs par tour)`;
     }
     html += odd>0
-      ? `<br>⚠️ <strong>Une équipe exempte par tour</strong> dans les salles à effectif impair — l'exemption tourne équitablement et compte 2 pts / 0-0.`
-      : `<br>✅ Aucune équipe exempte — tout le monde joue à chaque tour.`;
-    if(maxSlAM>morning || maxSlPM>afternoon){
-      html += `<br>🔀 Certains tours sont divisés en sous-vagues (plus de matchs que de terrains) → <strong>${maxSlAM}</strong> créneaux le matin, <strong>${maxSlPM}</strong> l'après-midi.`;
+      ? `<br>⚠️ Pour remplir les terrains : <strong>${missAM}</strong> équipe${missAM>1?'s':''} jouent 1 match de moins le matin, <strong>${missPM}</strong> l'après-midi (rotation équitable, exemption = +2 pts / 0-0).`
+      : `<br>✅ Tout le monde joue exactement le nombre de matchs prévu.`;
+    html += (freeAM+freePM)>0
+      ? `<br>🟦 Terrains libres cumulés : ${freeAM} le matin, ${freePM} l'après-midi (sur ${maxSlAM} + ${maxSlPM} créneaux).`
+      : `<br>✅ Tous les terrains sont occupés à chaque créneau.`;
+    if(maxSlAM!==morning || maxSlPM!==afternoon){
+      html += `<br>⏱ ${maxSlAM} créneaux le matin, ${maxSlPM} l'après-midi (pour ${morning} + ${afternoon} matchs visés par équipe).`;
     }
     if(halls>1){
       if(!lunchCk || hallMode==='same'){
@@ -1136,13 +1138,10 @@ function tClub(id){ const t=tObj(id); return t?t.club:''; }
 function tPlayers(id){ const t=tObj(id); return t&&(t.p1||t.p2)?[t.p1,t.p2].filter(Boolean).join(' & '):''; }
 
 function makeRoundMatches(active, maxCourts, oppCount){
-  // Un tour nominal doit faire jouer toutes les équipes possibles : la capacité
-  // des terrains est gérée ensuite par packSlots, pas ici.
   const maxMatches=Math.min(Math.floor(active.length/2), maxCourts);
   if(maxMatches===0||active.length<2) return [];
   let bestMatches=null, bestScore=Infinity;
-  const attempts=Math.min(120,Math.max(40,active.length*3));
-  for(let attempt=0;attempt<attempts;attempt++){
+  for(let attempt=0;attempt<40;attempt++){
     const pool=shuffle(active);
     const used=new Set();
     const matches=[];
@@ -1153,130 +1152,47 @@ function makeRoundMatches(active, maxCourts, oppCount){
       for(let j=0;j<pool.length;j++){
         const tB=pool[j]; if(tB===tA||used.has(tB)) continue;
         const opps=(oppCount[tA]||{})[tB]||0;
-        const sameClub=(tClub(tA)&&tClub(tB)&&tClub(tA)!=='—'&&tClub(tB)===tClub(tA))?20:0;
-        // Éviter fortement les adversaires déjà rencontrés ; le club commun
-        // reste une pénalité secondaire, sans bloquer les appariements possibles.
-        const sc=opps*100+sameClub+Math.random()*0.25;
+        const sameClub=(tClub(tA)&&tClub(tB)&&tClub(tA)!=='—'&&tClub(tA)===tClub(tB))?10:0;
+        const sc=opps*5+sameClub+Math.random()*0.3;
         if(sc<bestOppScore){ bestOppScore=sc; bestOpp=tB; }
       }
       if(bestOpp){ matches.push({tA,tB:bestOpp}); used.add(tA); used.add(bestOpp); score+=bestOppScore; }
     }
     if(matches.length>0&&score<bestScore){ bestScore=score; bestMatches=matches; }
-    if(bestMatches&&bestMatches.length===maxMatches&&bestScore<0.25) break;
+    if(bestMatches&&bestMatches.length===maxMatches&&bestScore<1) break;
   }
   return bestMatches||[];
 }
 
-// Répartit les matchs en créneaux physiques sans dépasser le nombre de terrains.
-// On peut compléter un créneau avec le tour suivant, mais on pénalise les équipes
-// qui ont déjà joué au créneau précédent (et, plus légèrement, deux créneaux avant).
-// Cela conserve une bonne occupation des terrains tout en limitant les matchs à la suite.
-function packSlots(allMatches,courts,initialPlayedTeams=new Set()){
-  const capacity=Math.max(1,Math.floor(+courts||1));
-  const playedImmediatelyBefore = initialPlayedTeams instanceof Set ? initialPlayedTeams : new Set(initialPlayedTeams||[]);
-  let bestSlots=null, bestConsecutive=Infinity;
-  // Plusieurs essais avec les mêmes matchs : on conserve d'abord le planning le
-  // plus court, puis celui qui impose le moins de matchs consécutifs.
-  const attempts=12;
-  for(let attempt=0;attempt<attempts;attempt++){
-    const remaining=shuffle(allMatches), slots=[], lastPlayedAt=new Map();
-    while(remaining.length){
-      const firstTour=Math.min(...remaining.map(m=>m.tourIdx));
-      const slot=[], used=new Set(), picked=new Set();
-      while(slot.length<capacity){
-        const candidates=[];
-        for(let i=0;i<remaining.length;i++){
-          const m=remaining[i];
-          if(m.tourIdx>firstTour+1) continue;
-          if(used.has(m.tA)||used.has(m.tB)) continue;
-          const immediateConflict=id=>{
-            const last=lastPlayedAt.get(id);
-            return last===slots.length-1 || (slots.length===0 && playedImmediatelyBefore.has(id));
-          };
-          const conflict=immediateConflict(m.tA)||immediateConflict(m.tB);
-          const score=(m.tourIdx-firstTour)*25+Math.random()*0.2;
-          candidates.push({i,m,score,conflict});
-        }
-        if(!candidates.length) break;
-        const safeCandidates=candidates.filter(c=>!c.conflict);
-        if(!safeCandidates.length){
-          // Ne pas imposer un match consécutif si l'on peut intercaler un créneau
-          // de repos. Si le créneau est déjà partiellement rempli, on le termine ici.
-          if(slot.length) break;
-          slots.push([]);
-          continue;
-        }
-        safeCandidates.sort((a,b)=>a.score-b.score);
-        const chosen=safeCandidates[0];
-        slot.push(chosen.m); picked.add(chosen.m);
-        used.add(chosen.m.tA); used.add(chosen.m.tB);
-      }
-      if(!slot.length){
-        // Garde-fou : une donnée inattendue ne doit jamais bloquer la génération.
-        const m=remaining[0]; slot.push(m); picked.add(m);
-      }
-      const slotIndex=slots.length;
-      slot.forEach(m=>{lastPlayedAt.set(m.tA,slotIndex);lastPlayedAt.set(m.tB,slotIndex);});
-      slots.push(slot);
-      for(let i=remaining.length-1;i>=0;i--) if(picked.has(remaining[i])) remaining.splice(i,1);
+// Découpe la liste des matchs d'une salle en créneaux de `courts` matchs max,
+// sans jamais mettre la même équipe deux fois dans un même créneau.
+function packSlots(allMatches,courts){
+  const remaining=[...allMatches], slots=[];
+  while(remaining.length){
+    const used=new Set(), slot=[], firstTour=remaining[0].tourIdx;
+    for(let i=0;i<remaining.length && slot.length<courts;){
+      const m=remaining[i];
+      if(m.tourIdx>firstTour+1) break;
+      if(used.has(m.tA)||used.has(m.tB)){ i++; continue; }
+      slot.push(m); used.add(m.tA); used.add(m.tB); remaining.splice(i,1);
     }
-    let consecutive=0;
-    for(let si=0;si<slots.length;si++){
-      const played=new Set(slots[si].flatMap(m=>[m.tA,m.tB]));
-      const prev=si===0?playedImmediatelyBefore:new Set(slots[si-1].flatMap(m=>[m.tA,m.tB]));
-      for(const id of played) if(prev.has(id)) consecutive++;
-    }
-    if(!bestSlots || consecutive<bestConsecutive || (consecutive===bestConsecutive && slots.length<bestSlots.length)){
-      bestSlots=slots; bestConsecutive=consecutive;
-    }
+    slots.push(slot);
   }
-  return bestSlots||[];
-}
-
-// Signature stable : permet de détecter un planning devenu obsolète après une
-// modification des paramètres, des équipes, des joueurs, des clubs ou des niveaux.
-function currentScheduleSignature(cfg=getCfg(), teams=ST.teams){
-  const cleanCfg={n:cfg.n,mt:cfg.mt,tt:cfg.tt,lunchBreak:cfg.lunchBreak,lunchDuration:cfg.lunchDuration,
-    start:cfg.start,lunchStart:cfg.lunchStart,bal:cfg.bal,matchesMorning:cfg.matchesMorning,
-    matchesAfternoon:cfg.matchesAfternoon,halls:cfg.halls,t1:cfg.t1,t2:cfg.t2,t3:cfg.t3,t4:cfg.t4,
-    hallMode:cfg.hallMode,targetMatchesPerTeam:cfg.targetMatchesPerTeam};
-  const cleanTeams=teams.map(t=>({id:t.id,name:t.name,club:t.club,p1:t.p1,p2:t.p2,lv:t.lv}));
-  return JSON.stringify({cfg:cleanCfg,teams:cleanTeams});
-}
-function validateTeamRoster(teams=ST.teams){
-  const playerOwners=new Map();
-  for(const t of teams){
-    const p1=normalizeName(t.p1), p2=normalizeName(t.p2);
-    if(!t.name?.trim() || !p1 || !p2) return `L’équipe « ${t.name||'(sans nom)'} » doit avoir un nom et deux joueurs.`;
-    if(p1===p2) return `Les deux joueurs de l’équipe « ${t.name} » semblent être la même personne.`;
-    for(const [player,other] of [[p1,t.p1],[p2,t.p2]]){
-      if(playerOwners.has(player)) return `Le joueur « ${other} » est déjà inscrit dans l’équipe « ${playerOwners.get(player)} ». Un joueur ne peut figurer que dans une seule équipe.`;
-      playerOwners.set(player,t.name);
-    }
-  }
-  return null;
+  return slots;
 }
 
 function buildSchedule(){
   const cfg=getCfg();
+  _setFill(cfg.fillMode);
   if(ST.teams.length<2){ alert('Il faut au moins 2 équipes.'); return false; }
-  if(ST.teams.length!==cfg.n){ alert(`La configuration prévoit ${cfg.n} équipes, mais ${ST.teams.length} sont inscrites.
-
-Corrigez le nombre d’équipes dans la configuration ou complétez la liste avant de générer le planning.`); return false; }
-  const rosterIssue=validateTeamRoster();
-  if(rosterIssue){ alert(rosterIssue); return false; }
   ST.cfg=cfg;
-  const N=ST.teams.length;
+  const N=Math.min(ST.teams.length,cfg.n);
   const allIds=ST.teams.slice(0,N).map(t=>t.id);
   const oppCount={}, playCount={}, byeCount={};
   allIds.forEach(id=>{ oppCount[id]={}; playCount[id]=0; byeCount[id]=0; });
 
-  const halls = Math.max(1,Math.min(4,+cfg.halls||1));
-  if(N < halls*2){
-    alert(`La configuration prévoit ${halls} salles, mais seulement ${N} équipes sont inscrites. Il faut au moins 2 équipes par salle. Réduisez le nombre de salles ou ajoutez des équipes avant de générer le planning.`);
-    return false;
-  }
-  const courtsArr = [cfg.t1||8, cfg.t2||cfg.t1||8, cfg.t3||cfg.t1||8, cfg.t4||cfg.t1||8].slice(0,halls).map(c=>Math.max(1,+c||1));
+  const halls = cfg.halls||1;
+  const courtsArr = [cfg.t1||8, cfg.t2||cfg.t1||8, cfg.t3||cfg.t1||8, cfg.t4||cfg.t1||8].slice(0,halls);
   const numGroups = _calcGroups(N, halls, cfg.t1||8, cfg.t2||cfg.t1||8, undefined, cfg.t3, cfg.t4).numGroups;
 
   // Effectifs de chaque salle, proportionnels à ses terrains → toutes les salles
@@ -1311,92 +1227,72 @@ Corrigez le nombre d’équipes dans la configuration ou complétez la liste ava
     groupsAfternoon = splitBySizes(allIds, plan.pm);
   }
 
-  // Sélectionne au plus 1 équipe au repos par groupe (si effectif impair),
-  // en priorisant celles qui ont le moins reposé / le plus joué.
-  function pickRestAndActive(grp){
-    const maxMatches=Math.floor(grp.length/2);
-    const numRest=grp.length - maxMatches*2; // 0 ou 1
-    let rest=[], active=[...grp];
-    if(numRest>0){
-      const tieOrder=new Map(shuffle(grp).map((id,i)=>[id,i]));
-      const sorted=[...grp].sort((a,b)=>
-        ((byeCount[a]||0)-(byeCount[b]||0)) ||
-        (playCount[b]-playCount[a]) ||
-        (tieOrder.get(a)-tieOrder.get(b))
-      );
-      rest=sorted.slice(0,numRest);
-      const restSet=new Set(rest);
-      active=grp.filter(id=>!restSet.has(id));
-      rest.forEach(id=>{ byeCount[id]=(byeCount[id]||0)+1; });
-    }
-    return {active, rest, maxMatches};
-  }
-
   const morningStart=cfg.start;
 
   // ──────────────────────────────────────────────────────────
-  // Pour une session (matin ou après-midi) : génère, pour chaque salle,
-  // la liste COMPLÈTE des matchs de tous les tours de la session
-  // (avec leur tour d'origine + exempt éventuel par tour), puis
-  // découpe cette liste en créneaux consécutifs de `courts` matchs —
-  // sans aucune case vide. Si un tour produit moins de matchs que de
-  // terrains, les terrains libres sont immédiatement comblés par les
-  // matchs du tour suivant (même salle).
+  // Pour une session (matin ou après-midi), pour chaque salle : on remplit TOUS les terrains
+  // à chaque créneau. On fait jouer en priorité les équipes qui ont le moins joué, puis celles
+  // qui attendent depuis le plus longtemps. Si le nombre de matchs ne tombe pas juste, quelques
+  // équipes (celles qui ont eu le moins d'exemptions jusque-là) jouent 1 match de moins :
+  // elles reçoivent une exemption (+2 pts / 0-0) sur un créneau où elles attendent.
+  // Une équipe ne quitte jamais sa salle pendant la session.
   // ──────────────────────────────────────────────────────────
-  function buildSessionHalls(groups, toursCount, initialPlayedTeams=new Set()){
+  function buildSessionHalls(groups, K){
     return groups.map((grp,gi)=>{
       const courts=courtsArr[gi]||8;
-      const allMatches=[]; // {tA,tB,tourIdx}
-      const byesByTour=[]; // byesByTour[tourIdx] = [ids]
-      for(let t=0;t<toursCount;t++){
-        const r=pickRestAndActive(grp);
-        const matches=makeRoundMatches(r.active,r.maxMatches,oppCount);
-        matches.forEach(m=>{ [m.tA,m.tB].forEach(id=>{ playCount[id]=(playCount[id]||0)+1; if(!oppCount[id]) oppCount[id]={}; const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1; }); });
-        matches.forEach(m=>allMatches.push({...m, tourIdx:t}));
-        byesByTour.push(r.rest);
-      }
-      // Découper en créneaux pleins de `courts` matchs
+      const pl=_hallPlan(grp.length,courts,K);
+      const S=pl.S;
+      const cap={}, played={}, idle={}, playedAt={};
+      grp.forEach(id=>{ cap[id]=K; played[id]=0; idle[id]=0; playedAt[id]=[]; });
+      [...grp].sort((a,b)=>((byeCount[a]||0)-(byeCount[b]||0))||(Math.random()-.5))
+        .slice(0,pl.missing).forEach(id=>{ cap[id]=K-1; });
       const slots=[];
-      slots.push(...packSlots(allMatches,courts,initialPlayedTeams));
+      for(let sl=0;sl<S;sl++){
+        // priorité : équipes avec le plus de matchs restants à jouer, puis celles qui attendent depuis le plus longtemps
+        const elig=grp.filter(id=>played[id]<cap[id])
+          .sort((a,b)=>((cap[b]-played[b])-(cap[a]-played[a]))||(idle[b]-idle[a])||(Math.random()-.5));
+        const mm=Math.min(pl.m, Math.floor(elig.length/2));
+        const matches=mm>0 ? makeRoundMatches(elig.slice(0,mm*2),mm,oppCount) : [];
+        const act=new Set();
+        matches.forEach(m=>{
+          [m.tA,m.tB].forEach(id=>{
+            act.add(id); played[id]++; idle[id]=0; playedAt[id].push(sl);
+            playCount[id]=(playCount[id]||0)+1;
+            const o=m.tA===id?m.tB:m.tA; oppCount[id][o]=(oppCount[id][o]||0)+1;
+          });
+        });
+        grp.forEach(id=>{ if(!act.has(id)) idle[id]++; });
+        slots.push(matches);
+      }
       if(slots.length===0) slots.push([]);
-      return { slots, byesByTour, label: numGroups>1?`Salle ${gi+1}`:'', teams:grp, courts };
+      // Exemptions : une par match manquant, sur un créneau où l'équipe attend (réparties au mieux)
+      const byesBySlot=slots.map(()=>[]);
+      grp.forEach(id=>{
+        for(let d=K-played[id]; d>0; d--){
+          const free=slots.map((_,i)=>i).filter(i=>!playedAt[id].includes(i) && !byesBySlot[i].includes(id));
+          if(!free.length) break;
+          free.sort((a,b)=>(byesBySlot[a].length-byesBySlot[b].length)||(Math.random()-.5));
+          byesBySlot[free[0]].push(id); byeCount[id]=(byeCount[id]||0)+1;
+        }
+      });
+      return { slots, byesBySlot, label: numGroups>1?`Salle ${gi+1}`:'', teams:grp, courts };
     });
   }
 
   function assembleEntries(hallsData, isAM, sessStart){
     const maxSlots = Math.max(...hallsData.map(h=>h.slots.length));
-    const seenByes = hallsData.map(()=>new Set()); // tours déjà annoncés (exempt affiché 1x)
     const entries=[];
     for(let s=0;s<maxSlots;s++){
       const matchTime=addMinutes(sessStart, s*(cfg.mt+cfg.tt));
-      // Tours représentés dans ce créneau, par salle (pour le label)
-      const tourLabels=new Set();
-      const hallsOut = hallsData.map((h,hi)=>{
-        const matches=(h.slots[s]||[]).map(m=>({tA:m.tA,tB:m.tB}));
-        const toursInSlot=new Set((h.slots[s]||[]).map(m=>m.tourIdx));
-        toursInSlot.forEach(ti=>tourLabels.add(ti));
-        // Afficher l'exempt du tour la première fois que ce tour apparaît dans cette salle
-        let byes=[];
-        toursInSlot.forEach(ti=>{
-          if(!seenByes[hi].has(ti)){ byes.push(...(h.byesByTour[ti]||[])); seenByes[hi].add(ti); }
-        });
-        return { matches, byes, label:h.label, teams:h.teams };
-      });
+      const hallsOut = hallsData.map(h=>({
+        matches:(h.slots[s]||[]).map(m=>({tA:m.tA,tB:m.tB})),
+        byes:(h.byesBySlot[s]||[]).slice(),
+        label:h.label, teams:h.teams
+      }));
       const restsAll=hallsOut.flatMap(h=>h.byes);
-      const sortedTours=[...tourLabels].sort((a,b)=>a-b);
-      let tourLabelStr;
-      if(sortedTours.length===0){
-        tourLabelStr = '⏸️ Repos programmé';
-      } else if(sortedTours.length===1){
-        tourLabelStr = `Tour ${sortedTours[0]+1}`;
-      } else if(sortedTours.length===sortedTours[sortedTours.length-1]-sortedTours[0]+1){
-        tourLabelStr = `Tours ${sortedTours[0]+1}→${sortedTours[sortedTours.length-1]+1}`;
-      } else {
-        tourLabelStr = `Tours ${sortedTours.map(t=>t+1).join('+')}`;
-      }
       entries.push({
-        roundTime:matchTime, session: isAM?'afternoon':'morning', posInSession:sortedTours[0]??0,
-        waveLabel:`${isAM?'🌤️':'☀️'} ${tourLabelStr}${maxSlots>1?` · créneau ${s+1}/${maxSlots}`:''}`,
+        roundTime:matchTime, session: isAM?'afternoon':'morning', posInSession:s,
+        waveLabel:`${isAM?'🌤️':'☀️'} Tour ${s+1}`,
         halls:hallsOut, hall1:hallsOut[0]||null, hall2:hallsOut[1]||null,
         subs:restsAll
       });
@@ -1415,76 +1311,12 @@ Corrigez le nombre d’équipes dans la configuration ou complétez la liste ava
   const afternoonStart = cfg.lunchBreak
     ? addMinutes(cfg.lunchStart,cfg.lunchDuration||60)
     : addMinutes(morningStart, morningEntries.length*(cfg.mt+cfg.tt));
-  // Sans pause déjeuner, la dernière vague du matin et la première de l'après-midi
-  // sont deux créneaux consécutifs : on évite de faire rejouer immédiatement ces équipes.
-  const lastMorningTeams = !cfg.lunchBreak && morningEntries.length
-    ? new Set(morningEntries[morningEntries.length-1].halls.flatMap(h=>(h.matches||[]).flatMap(m=>[m.tA,m.tB])))
-    : new Set();
-  const afternoonHallsData = buildSessionHalls(groupsAfternoon, cfg.matchesAfternoon, lastMorningTeams);
+  const afternoonHallsData = buildSessionHalls(groupsAfternoon, cfg.matchesAfternoon);
   const afternoonEntries = assembleEntries(afternoonHallsData, true, afternoonStart);
   schedule.push(...afternoonEntries);
 
   ST.schedule=schedule; ST.results={}; ST.activeRound=0;
-  ST.scheduleMeta=currentScheduleSignature(cfg,ST.teams);
   return true;
-}
-
-// Contrôle après génération : bilan objectif du planning (ne modifie jamais les matchs).
-function auditSchedule(){
-  const cfg=ST.cfg||getCfg();
-  const teams=ST.teams.slice(0, cfg.n || ST.teams.length);
-  const known=new Set(teams.map(t=>t.id));
-  const stats=new Map(teams.map(t=>[t.id,{id:t.id,name:t.name,matches:0,byes:0,opponents:{},lastSlot:-99,lastSession:null,maxGap:0,streak:0,maxStreak:0}]));
-  const problems=[], restWarnings=[]; let totalMatches=0, totalByes=0;
-  const duplicateIds=teams.map(t=>t.id).filter((id,i,arr)=>arr.indexOf(id)!==i);
-  if(duplicateIds.length) problems.push('Identifiant d’équipe en double : le planning ne peut pas être considéré comme fiable.');
-  let previousTime=null;
-  ST.schedule.forEach((rd,ri)=>{
-    const used=new Set();
-    if(previousTime && rd.roundTime && rd.roundTime<previousTime) problems.push(`Ordre horaire incohérent au créneau ${rd.roundTime}.`);
-    if(rd.roundTime) previousTime=rd.roundTime;
-    (rd.halls||[]).forEach((h,hi)=>{
-      const capacity=cfg['t'+(hi+1)] || cfg.t1 || 8;
-      if((h.matches||[]).length>capacity) problems.push(`${rd.roundTime||'Créneau '+(ri+1)} · ${h.label||'Salle '+(hi+1)} : ${h.matches.length} matchs pour ${capacity} terrains.`);
-      (h.matches||[]).forEach(m=>{
-        totalMatches++;
-        if(!known.has(m.tA)||!known.has(m.tB)){problems.push(`Match avec une équipe inconnue au créneau ${rd.roundTime||ri+1}.`);return;}
-        if(m.tA===m.tB) problems.push(`Une équipe joue contre elle-même au créneau ${rd.roundTime||ri+1}.`);
-        [m.tA,m.tB].forEach((id,j)=>{
-          if(used.has(id)) problems.push(`${tName(id)} apparaît plusieurs fois au créneau ${rd.roundTime||ri+1}.`);
-          used.add(id);
-          const st=stats.get(id); if(!st)return;
-          st.matches++;
-          if(st.lastSlot>=0) st.maxGap=Math.max(st.maxGap,ri-st.lastSlot-1);
-          const lunchSeparatesSessions=!!cfg.lunchBreak && st.lastSession!==null && st.lastSession!==rd.session;
-          const consecutive=st.lastSlot===ri-1 && !lunchSeparatesSessions;
-          if(consecutive){
-            const label=`${st.name} joue sur deux créneaux consécutifs (${ST.schedule[ri-1]?.roundTime||'créneau précédent'} et ${rd.roundTime||'créneau '+(ri+1)}).`;
-            if(!restWarnings.includes(label)) restWarnings.push(label);
-            st.streak=st.streak+1;
-          } else st.streak=1;
-          st.maxStreak=Math.max(st.maxStreak,st.streak);
-          st.lastSlot=ri; st.lastSession=rd.session;
-          const opp=j===0?m.tB:m.tA; st.opponents[opp]=(st.opponents[opp]||0)+1;
-        });
-      });
-      (h.byes||[]).forEach(id=>{
-        const st=stats.get(id);
-        if(st){st.byes++;totalByes++;}
-        else problems.push(`Exemption associée à une équipe inconnue au créneau ${rd.roundTime||ri+1}.`);
-      });
-    });
-  });
-  const values=[...stats.values()];
-  const counts=values.map(x=>x.matches);
-  const min=counts.length?Math.min(...counts):0, max=counts.length?Math.max(...counts):0;
-  values.filter(x=>x.matches===0).forEach(x=>problems.push(`${x.name} ne joue aucun match.`));
-  const repeats=[];
-  values.forEach(st=>Object.entries(st.opponents).forEach(([opp,n])=>{
-    if(n>1 && st.id.localeCompare(opp)<0) repeats.push({a:st.name,b:tName(opp),n});
-  }));
-  repeats.sort((a,b)=>b.n-a.n || a.a.localeCompare(b.a));
-  return {values,totalMatches,totalByes,min,max,problems,restWarnings,repeats};
 }
 
 // ══════════════════════════════════════════════════════════
@@ -1495,17 +1327,7 @@ function renderGen(){
   const cfg=getCfg();
   const el=document.getElementById('schedPreview'); if(!el) return;
   if(!ST.schedule.length){
-    const gib=document.getElementById('genInfoBox');
-    if(gib){
-      const cfgCount=getCfg().n;
-      gib.className='info info-y';
-      gib.innerHTML=ST.teams.length<2
-        ? '👥 Ajoutez au moins 2 équipes avant de générer le planning.'
-        : ST.teams.length!==cfgCount
-          ? `⚠️ La configuration prévoit <strong>${cfgCount} équipes</strong>, mais <strong>${ST.teams.length}</strong> sont inscrites. Ajustez la configuration ou la liste des équipes.`
-          : 'Cliquez sur « Régénérer » pour créer le planning.';
-    }
-    el.innerHTML='<div class="info info-y">Le planning apparaîtra ici une fois généré.</div>'; return;
+    el.innerHTML='<div class="info info-y">Cliquez sur Régénérer pour créer le planning.</div>'; return;
   }
   const playCount={};
   ST.teams.slice(0,cfg.n).forEach(t=>playCount[t.id]=0);
@@ -1519,7 +1341,6 @@ function renderGen(){
   const totalMatchCount=ST.schedule.reduce((s,rd)=>s+rd.halls.reduce((s2,h)=>s2+h.matches.length,0),0);
   const lastRd=ST.schedule[ST.schedule.length-1];
   const endTime=addMinutes(lastRd.roundTime,cfg.mt);
-  const audit=auditSchedule();
   const gib=document.getElementById('genInfoBox');
   if(gib){
     const byeCount={}; ST.teams.slice(0,cfg.n).forEach(t=>byeCount[t.id]=0);
@@ -1529,28 +1350,13 @@ function renderGen(){
     const totalByes=Object.values(byeCount).reduce((s,v)=>s+v,0);
     const numTours = cfg.matchesMorning+cfg.matchesAfternoon;
     const numEntries = ST.schedule.length;
-    const restOnlyEntries=ST.schedule.filter(rd=>(rd.halls||[]).every(h=>!(h.matches||[]).length)).length;
-    const emptyHallSlots=ST.schedule.reduce((n,rd)=>n+(rd.halls||[]).filter(h=>!(h.matches||[]).length).length,0);
-    const toursLabel = numEntries===numTours && emptyHallSlots===0
+    const toursLabel = numEntries===numTours
       ? `<strong>${numTours} tours</strong>`
-      : `<strong>${numTours} tours prévus</strong> répartis sur <strong>${numEntries} créneaux</strong>${restOnlyEntries?` · ${restOnlyEntries} créneau(x) de repos complet`:''}${emptyHallSlots?` · ${emptyHallSlots} salle(s)-créneau(x) sans match`:''}`;
+      : `<strong>${numTours} tours</strong> sur <strong>${numEntries} créneaux</strong> (sous-vagues car salle(s) avec plus de matchs que de terrains)`;
     gib.className='info info-g';
-    const isFresh=!!ST.scheduleMeta && ST.scheduleMeta===currentScheduleSignature(cfg,ST.teams);
-    gib.className=isFresh?'info info-g':'info info-y';
-    gib.innerHTML=`${isFresh?'✅ Planning à jour':'⚠️ Planning à vérifier : paramètres ou équipes modifiés'}<br><strong>${ST.teams.slice(0,cfg.n).length} équipes</strong> · ${toursLabel} · <strong>${totalMatchCount} matchs</strong><br>
+    gib.innerHTML=`✅ <strong>${ST.teams.slice(0,cfg.n).length} équipes</strong> · ${toursLabel} · <strong>${totalMatchCount} matchs</strong><br>
     Matchs/équipe : <strong>${minPlay}–${maxPlay}</strong>${totalByes>0?` · ${totalByes} exemption(s)`:' · Toutes jouent'}<br>
-    ${cfg.start} → ${endTime}${!isFresh?'<br>👉 Cliquez sur « Régénérer » avant de lancer le tournoi.':''}
-    <details style="margin-top:10px;text-align:left;background:rgba(255,255,255,.65);border:1px solid var(--line);border-radius:8px;padding:8px 10px">
-      <summary style="cursor:pointer;font-weight:800">🔎 Contrôle du planning · ${audit.problems.length?'⚠️ '+audit.problems.length+' anomalie(s) structurelle(s)':'✅ aucune anomalie structurelle'}${audit.restWarnings.length?' · ⚠️ '+audit.restWarnings.length+' repos à vérifier':''}</summary>
-      <div style="margin-top:8px;font-size:12px;line-height:1.6">
-        <strong>Équité des matchs :</strong> ${audit.min} à ${audit.max} match(s) par équipe · ${audit.totalByes} exemption(s) affichée(s).<br>
-        ${audit.problems.length?`<div style="color:var(--red);font-weight:700;margin-top:5px">${audit.problems.slice(0,8).map(x=>'• '+escHtml(x)).join('<br>')}${audit.problems.length>8?`<br>… et ${audit.problems.length-8} autre(s).`:''}</div>`:'<span style="color:var(--grn);font-weight:700">Aucune équipe n’est détectée deux fois sur le même créneau et aucune capacité de salle n’est dépassée.</span>'}
-        ${audit.restWarnings.length?`<div style="color:var(--red);font-weight:700;margin-top:7px"><strong>Repos d’un créneau non respecté :</strong><br>${audit.restWarnings.slice(0,10).map(x=>'• '+escHtml(x)).join('<br>')}${audit.restWarnings.length>10?`<br>… et ${audit.restWarnings.length-10} autre(s).`:''}</div>`:'<div style="margin-top:7px;color:var(--grn);font-weight:700">✅ Toutes les équipes ont au moins un créneau de repos entre deux matchs, hors pause déjeuner.</div>'}
-        ${audit.repeats.length?`<div style="margin-top:7px"><strong>Adversaires rencontrés plusieurs fois :</strong><br>${audit.repeats.slice(0,8).map(x=>`${escHtml(x.a)} ↔ ${escHtml(x.b)} : ${x.n} fois`).join('<br>')}${audit.repeats.length>8?'<br>… autres répétitions.':''}</div>`:'<div style="margin-top:7px">Aucune répétition d’adversaire détectée.</div>'}
-        <div style="margin-top:7px"><strong>Matchs et repos par équipe :</strong><br>${audit.values.map(x=>`${escHtml(x.name)} : ${x.matches} match(s), ${x.byes} exemption(s), série max. ${x.maxStreak} match(s) consécutif(s)`).join(' · ')}</div>
-        <div style="margin-top:6px;color:var(--muted)">Le contrôle vérifie les collisions, les capacités des salles, les équipes inconnues ou sans match, les repos, les séries de matchs consécutifs et les adversaires répétés. Un repos manquant est signalé même si les contraintes du tournoi ne permettent pas toujours de l’éviter.</div>
-      </div>
-    </details>`;
+    ${cfg.start} → ${endTime}`;
   }
   function renderWaveBlock(rd,ri){
     const halls=rd.halls;
@@ -1558,12 +1364,11 @@ function renderGen(){
       <div class="round-hdr">
         <span class="round-hdr-ttl">${rd.waveLabel||'🎯 Vague '+(ri+1)}</span>
         <span class="round-time-badge">🕐 ${rd.roundTime}</span>
-        ${rd.subs.length?`<span class="sub-badge">🟡 Exempt: ${rd.subs.map(id=>tName(id)).join(', ')}</span>`:'<span style="font-size:11px;color:var(--grn);font-weight:700">✓ Sans exemption déclarée</span>'}
+        ${rd.subs.length?`<span class="sub-badge">🟡 Exempt: ${rd.subs.map(id=>tName(id)).join(', ')}</span>`:'<span style="font-size:11px;color:var(--grn);font-weight:700">✅ Tous jouent</span>'}
         <span style="font-size:11px;color:var(--muted);margin-left:auto">${halls.reduce((s,h)=>s+h.matches.length,0)} matchs</span>
       </div>
       ${halls.map(h=>`<div class="wave-block">
         ${h.label?`<div class="wave-hdr"><span>${h.label}</span></div>`:''}
-        ${!h.matches.length?'<div style="padding:8px 12px;font-size:12px;color:var(--muted);font-weight:700">⏸️ Repos programmé dans cette salle sur ce créneau.</div>':''}
         ${h.matches.map((m,mi)=>`<div class="rp-match">
           <span class="rp-court">T${mi+1}</span>
           <span class="rp-pair"><strong>${tName(m.tA)}</strong> <span style="font-size:10px;color:var(--muted)">${tClub(m.tA)}</span>${tPlayers(m.tA)?`<br><span style="font-size:10px;font-weight:400;color:var(--muted)">👤 ${tPlayers(m.tA)}</span>`:''}</span>
@@ -1784,11 +1589,8 @@ window.saveEditTeam = async function(){
   const p2   = document.getElementById('edit_t_p2').value.trim();
   const lv   = +document.getElementById('edit_t_lv').value || 3;
   if(!name||!p1||!p2){ alert('Nom, Joueur 1 et Joueur 2 sont obligatoires.'); return; }
-  const proposed=ST.teams.map(x=>x.id===id?{...x,name,club,p1,p2,lv}:x);
-  const rosterIssue=validateTeamRoster(proposed); if(rosterIssue){ alert(rosterIssue); return; }
   t.name=name; t.club=club; t.p1=p1; t.p2=p2; t.lv=lv;
-  const saved=await saveTournament({ teams: ST.teams });
-  if(!saved){ alert('Modification non enregistrée : vérifiez la connexion.'); return; }
+  await saveTournament({ teams: ST.teams });
   closeEditTeam();
   renderTeams();
   if(ST.schedule.length){ renderMatches(); renderMiniStandings(); renderRoundTabs(); }
@@ -1804,13 +1606,9 @@ window.addTeam = async function(){
   const p2    = document.getElementById('t_p2').value.trim();
   const lv    = +document.getElementById('t_lv').value || 3;
   if(!name||!p1||!p2){ alert('Nom, Joueur 1 et Joueur 2 sont obligatoires.'); return; }
-  if(ST.teams.length >= (+document.getElementById('cfg_n').value||32)){ alert('Le nombre d’équipes configuré est déjà atteint. Augmentez-le dans Configuration si nécessaire.'); return; }
-  const candidate={id:'validation',name,club,p1,p2,lv};
-  const rosterIssue=validateTeamRoster([...ST.teams,candidate]); if(rosterIssue){ alert(rosterIssue); return; }
   const id = 't_' + Date.now() + '_' + Math.random().toString(36).slice(2,6);
   ST.teams.push({ id, name, club, p1, p2, lv });
-  const saved=await saveTournament({ teams: ST.teams });
-  if(!saved){ ST.teams=ST.teams.filter(t=>t.id!==id); alert('Équipe non enregistrée : vérifiez la connexion puis réessayez.'); return; }
+  await saveTournament({ teams: ST.teams });
   ['t_name','t_club','t_p1','t_p2'].forEach(fid=>{ const el=document.getElementById(fid); if(el) el.value=''; });
   document.getElementById('t_lv').value='3';
   renderTeams();
@@ -1862,30 +1660,24 @@ window.autoFillTeams = async function(){
 window.regenerate = async function(){
   if(!isAdmin()) return;
   ST.schedule = []; // force rebuild
-  if(buildSchedule()){ const ok=await saveTournament({ schedule: ST.schedule, scheduleMeta:ST.scheduleMeta, activeRound:0 }); if(!ok){ alert('Le planning est calculé mais n’a pas pu être enregistré. Vérifiez la connexion.'); return; } renderGen(); }
+  if(buildSchedule()){ await saveTournament({ schedule: ST.schedule, activeRound:0 }); renderGen(); }
 };
 window.startTournament = async function(){
   if(!isAdmin()) return;
   if(!ST.schedule||ST.schedule.length===0){ if(!buildSchedule()) return; }
-  const expected=currentScheduleSignature(getCfg(),ST.teams);
-  if(!ST.scheduleMeta || ST.scheduleMeta!==expected){
-    alert(`Le planning est absent ou obsolète : les équipes ou les paramètres ont changé depuis sa création.\n\nCliquez sur « Régénérer » dans la page Planning, vérifiez le résultat, puis relancez le tournoi.`);
-    goTo(3); renderGen(); return;
-  }
   ST.results={}; ST.activeRound=0;
-  const ok=await saveTournament({ schedule: ST.schedule, scheduleMeta:ST.scheduleMeta, activeRound:0, status:'active', results:{} });
-  if(!ok){ alert('Impossible de lancer le tournoi : les données n’ont pas été enregistrées. Vérifiez la connexion.'); return; }
+  await saveTournament({ schedule: ST.schedule, activeRound:0, status:'active', results:{} });
   goTo(4);
 };
 window.newTournament = async function(){
   if(!isAdmin()){ alert('Admin uniquement.'); return; }
   if(!confirm('Nouveau tournoi ? Toutes les données seront perdues.')) return;
   clearInterval(ST.timerIv);
-  ST.teams=[]; ST.schedule=[]; ST.scheduleMeta=null; ST.results={}; ST.activeRound=0;
+  ST.teams=[]; ST.schedule=[]; ST.results={}; ST.activeRound=0;
   ST.timerSec=0; ST.timerRun=false; ST.rulesOpen=false;
   document.getElementById('ruleBtn').textContent='📋 Règlement';
   ST.timers = timersDefault();
-  await saveTournament({ cfg:ST.cfg, teams:[], schedule:[], scheduleMeta:null, activeRound:0, status:'setup' });
+  await saveTournament({ cfg:ST.cfg, teams:[], schedule:[], activeRound:0, status:'setup' });
   await saveTimers(ST.timers);
   renderTeams(); goTo(1); onCfgChange();
 };
@@ -2158,19 +1950,13 @@ function getGlobalMatchIdxFromHallIdx(r, hallIdx, localMi){
   return offset+localMi;
 }
 
-// Échappe les valeurs provenant des noms/équipes avant leur insertion dans le HTML.
-function escHtml(value){
-  return String(value == null ? '' : value).replace(/[&<>\"']/g, ch => ({
-    '&':'&amp;', '<':'&lt;', '>':'&gt;', '\"':'&quot;', "'":'&#39;'
-  }[ch]));
-}
 function stblHTML(arr,limit){
   const med=['🥇','🥈','🥉'];
   const rows=(limit?arr.slice(0,limit):arr).map((s,i)=>{
     const gd=s.gf-s.ga;
     return `<tr><td class="rank-c" style="color:${i<3?'var(--grn)':'var(--dim)'}">${med[i]||i+1}</td>
-      <td><span style="font-weight:700">${escHtml(s.name)}</span>${s.club&&s.club!=='—'?` <span class="t-club-badge">${escHtml(s.club)}</span>`:''}${s.byeTours>0?` <span class="sub-badge" title="${Number(s.byeTours)||0} exemption(s)">🟡×${Number(s.byeTours)||0}</span>`:''}
-      <div style="font-size:11px;color:var(--muted)">${escHtml(s.p1)} · ${escHtml(s.p2)}</div></td>
+      <td><span style="font-weight:700">${s.name}</span>${s.club&&s.club!=='—'?` <span class="t-club-badge">${s.club}</span>`:''}${s.byeTours>0?` <span class="sub-badge" title="${s.byeTours} exemption(s)">🟡×${s.byeTours}</span>`:''}
+      <div style="font-size:11px;color:var(--muted)">${s.p1} · ${s.p2}</div></td>
       <td class="played-c">${s.played}</td><td class="wc">${s.w}</td><td class="dc">${s.d}</td><td class="lc">${s.l}</td>
       <td>${s.gf}</td><td>${s.ga}</td><td class="${gd>=0?'gdp':'gdn'}">${gd>0?'+':''}${gd}</td><td class="pts-c">${s.pts}</td></tr>`;
   }).join('');
@@ -2188,9 +1974,9 @@ function renderFinal(){
   if(pod) pod.innerHTML=st.slice(0,3).map((s,i)=>`
     <div class="pod ${med[i].cls}">
       <div class="pod-ico">${med[i].ico}</div>
-      <div class="pod-nm">${escHtml(s.name)}</div>
-      <div class="pod-detail">${s.club!=='—'?escHtml(s.club):''}</div>
-      <div style="font-size:12px;color:var(--muted);margin-bottom:8px">${escHtml(s.p1)} · ${escHtml(s.p2)}</div>
+      <div class="pod-nm">${s.name}</div>
+      <div class="pod-detail">${s.club!=='—'?s.club:''}</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:8px">${s.p1} · ${s.p2}</div>
       <div class="pod-pts">${s.pts} pts</div>
       <div class="pod-rec">${s.w}V · ${s.d}N · ${s.l}D · ${s.gf}/${s.ga}</div>
     </div>`).join('');
@@ -3428,7 +3214,7 @@ window.printPlanning = function(){
       </div></div>`;
   });
   const win=_printWin('Planning');
-  win.document.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Planning Interclub</title><style>@page{size:A4 portrait;margin:10mm}body{margin:0;font-family:Arial,sans-serif;font-size:11px;color:#111}.match-row{break-inside:avoid;page-break-inside:avoid}@media print{.noprint{display:none!important} .round-block{break-inside:avoid-page;page-break-inside:avoid} }</style></head><body>'+body+'<div class="noprint" style="margin-top:20px"><button onclick="window.print()">Imprimer</button></div></body></html>');
+  win.document.write('<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Planning Interclub</title><style>body{margin:16px;font-family:sans-serif;font-size:12px}@media print{.noprint{display:none}}</style></head><body>'+body+'<div class="noprint" style="margin-top:20px"><button onclick="window.print()">Imprimer</button></div></body></html>');
   win.document.close(); setTimeout(()=>win.print(),400);
 };
 window.printStandings = function(){
@@ -3726,10 +3512,10 @@ function _teamSlipHtml(tid){
   const pm=rows.filter(r=>r.session!=='morning');
   const hallsOf=a=>[...new Set(a.map(r=>r.hall).filter(Boolean))].join(' puis ');
   const rowHtml=r=>{
-    if(r.type==='bye') return `<tr class="bye"><td class="t">${escHtml(r.time)}</td><td class="c">—</td><td>🟡 Exempt (repos)</td></tr>`;
+    if(r.type==='bye') return `<tr class="bye"><td class="t">${r.time}</td><td class="c">—</td><td>🟡 Exempt (repos)</td></tr>`;
     const o=tObj(r.opp);
-    const club=o&&o.club&&o.club!=='—'?` <span class="cl">${escHtml(o.club)}</span>`:'';
-    return `<tr><td class="t">${escHtml(r.time)}</td><td class="c">${r.hall?escHtml(r.hall)+' · ':''}${escHtml(r.court)}</td><td><strong>${escHtml(o?o.name:r.opp)}</strong>${club}${o?`<br><span class="pl">👤 ${escHtml(o.p1)} &amp; ${escHtml(o.p2)}</span>`:''}</td></tr>`;
+    const club=o&&o.club&&o.club!=='—'?` <span class="cl">${o.club}</span>`:'';
+    return `<tr><td class="t">${r.time}</td><td class="c">${r.hall?r.hall+' · ':''}${r.court}</td><td><strong>${o?o.name:r.opp}</strong>${club}${o?`<br><span class="pl">👤 ${o.p1} &amp; ${o.p2}</span>`:''}</td></tr>`;
   };
   const secHdr=(ico,lbl,a)=>{ const h=multi?hallsOf(a):''; return `<tr class="sec"><td colspan="3">${ico} ${lbl}${h?' — '+h:''}</td></tr>`; };
   let body=secHdr('☀️','MATIN',am)+am.map(rowHtml).join('');
@@ -3738,10 +3524,10 @@ function _teamSlipHtml(tid){
     body+=`<tr class="lunch"><td colspan="3">🍽️ Déjeuner ${ls} → ${addMinutes(ls,cfg.lunchDuration||60)}</td></tr>`;
   }
   body+=secHdr('🌤️','APRÈS-MIDI',pm)+pm.map(rowHtml).join('');
-  const clubBadge=team.club&&team.club!=='—'?`<span class="badge">${escHtml(team.club)}</span>`:'';
+  const clubBadge=team.club&&team.club!=='—'?`<span class="badge">${team.club}</span>`:'';
   return `<div class="slip">
-    <div class="slip-hdr"><span>🏓 ${escHtml(team.name)} ${clubBadge}</span></div>
-    <div class="slip-pl">👤 ${escHtml(team.p1)} &amp; ${escHtml(team.p2)}</div>
+    <div class="slip-hdr"><span>🏓 ${team.name} ${clubBadge}</span></div>
+    <div class="slip-pl">👤 ${team.p1} &amp; ${team.p2}</div>
     <table><thead><tr><th>Heure</th><th>${multi?'Salle · Terrain':'Terrain'}</th><th>Adversaire</th></tr></thead><tbody>${body}</tbody></table>
     <div class="slip-ft">Matchs de ${cfg.mt||15} min</div>
   </div>`;
@@ -3812,13 +3598,6 @@ window.printAllTeamSchedules = function(){
     .fiche-bilan{margin-top:2px;font-size:9px;font-weight:700;color:#1a2540;text-align:right}
     @media print{
       @page{size:A4 portrait;margin:0}
-      .view:not(.on){display:none!important}
-      .view.on{display:block!important}
-      .sheet{width:210mm;height:297mm;margin:0;padding:4mm;box-shadow:none;overflow:hidden;break-after:page;page-break-after:always}
-      .sheet:last-child{break-after:auto;page-break-after:auto}
-      .slip table{table-layout:fixed}
-      .slip td,.slip th{overflow-wrap:anywhere}
-      .slip tr{break-inside:avoid;page-break-inside:avoid}
       html{-webkit-print-color-adjust:exact;print-color-adjust:exact}
       body{background:#fff}
       .noprint{display:none!important}
@@ -3840,9 +3619,7 @@ window.printAllTeamSchedules = function(){
         <option value="d">Ancien format dense (avec scores)</option>
       </select>
     </label>
-    <button type="button" onclick="window.print()" style="background:#1a2540;color:#fff;border:0;border-radius:5px;padding:7px 13px;font-weight:700;cursor:pointer">🖨 Imprimer / PDF</button>
-    <button type="button" onclick="window.close()" style="border:1px solid #aaa;border-radius:5px;padding:7px 10px;cursor:pointer">Fermer</button>
-    <span style="font-size:11px;color:#666">Programme complet matin + après-midi · fiches à découper selon les pointillés. Dans la fenêtre d’impression, choisissez A4 portrait et désactivez les en-têtes/pieds de page.</span>
+    <span style="font-size:11px;color:#666">Programme complet matin + après-midi · à découper selon les pointillés · cliquez sur « Imprimer » (barre du haut) · désactivez les en-têtes/pieds de page dans les options d'impression</span>
   </div>
   <div class="view" id="v2">${pages(2)}</div>
   <div class="view" id="v3">${pages(3)}</div>
@@ -4678,7 +4455,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
         </div>
       </div>
       <div style="font-size:11px;color:var(--muted);margin-top:2px">
-        💡 Avec 2 salles ou plus, les équipes sont réparties <strong>proportionnellement au nombre de terrains</strong> de chaque salle, pour que toutes les salles finissent presque en même temps le matin et l'après-midi. Une équipe ne change jamais de salle au cours d'une même session. Si une salle a un effectif impair, 1 équipe y est exempte par tour (rotation équitable, +2 pts / 0-0).
+        💡 Avec 2 salles ou plus, les équipes sont réparties <strong>proportionnellement au nombre de terrains</strong> de chaque salle, pour que toutes les salles finissent presque en même temps le matin et l'après-midi. Une équipe ne change jamais de salle au cours d'une même session. Les terrains sont remplis à chaque créneau ; si le nombre de matchs ne tombe pas juste, quelques équipes jouent 1 match de moins (rotation équitable, exemption = +2 pts / 0-0).
       </div>
       <div class="fr" id="cfg_hallmode_row" style="display:none;margin-top:8px">
         <div>
@@ -4687,6 +4464,17 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
             <option value="mix" selected>Mélange libre (certaines restent, d'autres changent)</option>
             <option value="same">Même salle toute la journée</option>
             <option value="swap">Changer de salle à midi (matin salle 1 → après-midi salle 2, et inversement)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="fr" style="margin-top:8px">
+        <div>
+          <label>Quand le nombre de matchs ne tombe pas juste avec les terrains</label>
+          <select id="cfg_fill" onchange="onCfgChange()">
+            <option value="auto" selected>Équilibré (quelques équipes jouent 1 match de moins, jamais plus d'1/3 de la salle)</option>
+            <option value="full">Terrains toujours pleins (davantage d'équipes peuvent jouer 1 match de moins)</option>
+            <option value="exact">Nombre de matchs exact en priorité (quelques terrains libres en fin de session)</option>
           </select>
         </div>
       </div>
