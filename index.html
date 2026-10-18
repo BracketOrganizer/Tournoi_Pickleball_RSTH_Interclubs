@@ -65,6 +65,8 @@ let unsubLiveWatch  = null;
 let unsubUserList        = null; // liste des utilisateurs (admin) — temps réel
 let unsubClubList        = null; // liste des clubs + quotas (admin) — temps réel
 let unsubPendingRegs     = null; // inscriptions d'équipes en attente (admin) — temps réel
+let unsubClubCounts      = null; // compteurs d'inscriptions par club (admin) — temps réel
+let _specEntering        = false; // true pendant l'entrée en mode Live (chargement des données avant affichage)
 let unsubClubTeams       = null; // équipes du club connecté — temps réel
 let liveWatchIv     = null; // polling de secours (mobile en veille)
 let pendingSpecTarget = null;
@@ -156,6 +158,7 @@ onAuthStateChanged(auth, async (user)=>{
       subscribeToResults();
       subscribeToMessages();
       toggleClubExtraNav(hasClub);
+      if(USER_ROLES.includes('admin')) loadPendingRegistrations(); // inscriptions en attente : temps réel dès la connexion
       return;
     }
     if(hasClub){
@@ -197,6 +200,7 @@ function unsubAll(){
   if(unsubUserList)   { unsubUserList();    unsubUserList=null;    }
   if(unsubClubList)   { unsubClubList();    unsubClubList=null;    }
   if(unsubPendingRegs){ unsubPendingRegs(); unsubPendingRegs=null; }
+  if(unsubClubCounts){ unsubClubCounts(); unsubClubCounts=null; }
   if(unsubClubTeams)  { unsubClubTeams();   unsubClubTeams=null;   }
   stopLiveWatch();
   startLiveWatch();
@@ -228,6 +232,7 @@ window.loginGoogle = async function(){
   }
 };
 window.logout = async function(){
+  closeAdminPanel();
   clearInterval(ST.timerIv); unsubAll();
   USER_ROLE = null; USER_ROLES = []; CURRENT_USER = null;
   toggleClubExtraNav(false);
@@ -256,7 +261,10 @@ window.enterLiveModeAndGo = async function(target){
   const stepNav = document.getElementById('stepNav');
   if(stepNav) stepNav.style.display = 'none';
   applyRoleUI();
+  closeAdminPanel();
   subscribeToMessages();
+  // Sans compte, personne n'écoutait le tournoi : le planning restait vide ("non programmé").
+  await startPublicSubscriptions();
   if(target === 'R'){ toggleRules(); }
   else if(target === 'T'){ goTo('T'); }
   else { goTo(target); }
@@ -338,10 +346,12 @@ document.addEventListener('visibilitychange', async ()=>{
   } catch(e){ console.warn('resync visibilitychange', e); }
 });
 
-function subscribeToTournamentPublic(){
+function subscribeToTournamentPublic(onFirst){
   if(!unsubLiveWatch || !liveWatchIv) startLiveWatch();
+  let first = true;
+  const done = ()=>{ if(first){ first=false; if(onFirst) onFirst(); } };
   unsubTournament = onSnapshot(doc(db,'interclub','current'), (snap)=>{
-    if(!snap.exists()) return;
+    if(!snap.exists()){ done(); return; }
     const data=snap.data();
     if(data.cfg)      ST.cfg      = data.cfg;
     if(data.teams)    ST.teams    = data.teams;
@@ -353,14 +363,18 @@ function subscribeToTournamentPublic(){
     handleLiveOpenChange(data.liveOpen === true);
     if(ST.page===4) renderTournament();
     if(ST.page===5) renderFinal();
+    if(ST.page==='T') renderTeamsSpecPage();
     if(ST.page==='TV') renderTVContent();
-    if(ST.schedule.length>0 && ST.page<4) goTo(4);
-  }, (e)=>{ console.warn('subscribeToTournamentPublic', e); });
+    if(!_specEntering && ST.schedule.length>0 && ST.page===1) goTo(4);
+    done();
+  }, (e)=>{ console.warn('subscribeToTournamentPublic', e); done(); });
 }
 function normalizeResult(data){
   return { ga: data.ga==null?'':data.ga, gb: data.gb==null?'':data.gb };
 }
-function subscribeToResultsPublic(){
+function subscribeToResultsPublic(onFirst){
+  let first = true;
+  const done = ()=>{ if(first){ first=false; if(onFirst) onFirst(); } };
   unsubResults = onSnapshot(collection(db,'interclub_results'), (snap)=>{
     snap.docChanges().forEach(change=>{
       if(change.type==='removed') delete ST.results[change.doc.id];
@@ -368,8 +382,20 @@ function subscribeToResultsPublic(){
     });
     if(ST.page===4){ renderMatches(); renderMiniStandings(); checkDone(); }
     if(ST.page===5) renderFinal();
+    if(ST.page==='T') renderTeamsSpecPage();
     if(ST.page==='TV') renderTVContent();
-  });
+    done();
+  }, (e)=>{ console.warn('subscribeToResultsPublic', e); done(); });
+}
+// Mode Live sans compte : écoute le tournoi + les résultats (une seule fois) et attend
+// la première réception (5 s max) pour ne pas afficher « non programmé » à tort.
+async function startPublicSubscriptions(){
+  const waits = [];
+  _specEntering = true;
+  if(!unsubTournament) waits.push(new Promise(res=>subscribeToTournamentPublic(res)));
+  if(!unsubResults)    waits.push(new Promise(res=>subscribeToResultsPublic(res)));
+  try { await Promise.race([ Promise.all(waits), new Promise(r=>setTimeout(r,5000)) ]); }
+  finally { _specEntering = false; }
 }
 let unsubMessages = null, TV_MESSAGES = [];
 function subscribeToMessages(){
@@ -400,6 +426,7 @@ function subscribeToTournament(){
     if(ST.page===4) renderTournament();
     if(ST.page===5) renderFinal();
     if(ST.page==='TV') renderTVContent();
+    if(unsubPendingRegs) renderPendingRegistrationsIC(); // quota / places restantes à jour
   });
 }
 function subscribeToResults(){
@@ -440,11 +467,13 @@ async function auditLog(action, data){
 // UI LOGIN / APP
 // ══════════════════════════════════════════════════════════
 function showLogin(){
+  closeAdminPanel();
   document.getElementById('loginScreen').style.display='flex';
   document.getElementById('appScreen').style.display='none';
   const cs=document.getElementById('clubScreen'); if(cs) cs.style.display='none';
 }
 function showApp(){
+  closeAdminPanel();
   document.getElementById('loginScreen').style.display='none';
   document.getElementById('appScreen').style.display='block';
   const cs=document.getElementById('clubScreen'); if(cs) cs.style.display='none';
@@ -498,6 +527,7 @@ window.toggleClubExtraNav = function(show){
   if(b2) b2.style.display = show ? '' : 'none';
 };
 async function showClubScreen(){
+  closeAdminPanel();
   document.getElementById('loginScreen').style.display='none';
   document.getElementById('appScreen').style.display='none';
   const cs=document.getElementById('clubScreen');
@@ -514,6 +544,7 @@ async function showClubScreen(){
 }
 window.openClubFromApp = function(){ showClubScreen(); };
 window.returnToAppFromClub = function(){
+  closeAdminPanel();
   const cs=document.getElementById('clubScreen');
   if(cs) cs.style.display='none';
   document.getElementById('appScreen').style.display='block';
@@ -663,6 +694,7 @@ function showAuthMsg(msg,color){
   el.style.color=color==='red'?'var(--red)':'var(--grn)';
 }
 function applyRoleUI(){
+  if(!isAdmin()) closeAdminPanel(); // le panneau admin ne reste jamais ouvert pour un non-admin
   const name = CURRENT_USER
     ? (CURRENT_USER.displayName||CURRENT_USER.email||'?')
     : '📺 Mode Live';
@@ -697,6 +729,7 @@ function updateStepVisibility(){
 
 // ── Navigation ─────────────────────────────────────────
 window.goTo = function(n){
+  closeAdminPanel(); // changement de page = le panneau admin se referme
   // Bloquer l'accès aux pages de contenu pour un spectateur si le live est fermé
   if(isLiveBlocked() && n!=='R' && n!=='T'){
     pendingSpecTarget = n;
@@ -799,6 +832,7 @@ window.spectatorGoLive = async function(n){
 };
 
 window.toggleRules = function(){
+  closeAdminPanel();
   ST.rulesOpen=!ST.rulesOpen;
   if(!ST.rulesOpen && isLiveBlocked()){
     // Live fermé : retourner à l'overlay "live fermé" plutôt que déconnecter
@@ -2596,6 +2630,25 @@ function updateLiveToggleBtn(){
 // ══════════════════════════════════════════════════════════
 // ADMIN PANEL
 // ══════════════════════════════════════════════════════════
+// Ferme le panneau admin (oubli de fermeture, changement de page, déconnexion, changement de compte…).
+// Coupe aussi les écoutes temps réel des listes utilisateurs / clubs et efface les mots de passe saisis.
+// (Les inscriptions en attente restent écoutées pendant toute la session admin.)
+function closeAdminPanel(){
+  const el = document.getElementById('adminPanel');
+  if(el) el.style.display = 'none';
+  if(unsubUserList){ unsubUserList(); unsubUserList=null; }
+  if(unsubClubList){ unsubClubList(); unsubClubList=null; }
+  if(unsubClubCounts){ unsubClubCounts(); unsubClubCounts=null; }
+  ['newU_pwd','newC_pwd'].forEach(id=>{ const i=document.getElementById(id); if(i) i.value=''; });
+}
+window.closeAdminPanel = closeAdminPanel;
+// Panneau resté ouvert pendant que l'appli était en arrière-plan > 5 min : on le referme.
+let _adminHiddenAt = 0;
+document.addEventListener('visibilitychange', ()=>{
+  if(document.visibilityState==='hidden'){ _adminHiddenAt = Date.now(); return; }
+  if(_adminHiddenAt && Date.now()-_adminHiddenAt > 5*60*1000) closeAdminPanel();
+  _adminHiddenAt = 0;
+});
 window.toggleAdminPanel = function(){
   const el=document.getElementById('adminPanel');
   const opening = el.style.display==='none';
@@ -2803,7 +2856,7 @@ window.loadClubList = function(){
     snap.forEach(d=>{ const u=d.data(); const rs = Array.isArray(u.roles)&&u.roles.length ? u.roles : [u.role]; if(rs.includes('club')) latestClubs.push({uid:d.id,...u}); });
     render();
   }, (e)=>{ listEl.innerHTML=`<tr><td colspan="5" style="color:var(--red);padding:10px 0">Erreur : ${e.message}</td></tr>`; });
-  onSnapshot(collection(db,'interclub_registrations'), (snap)=>{
+  unsubClubCounts = onSnapshot(collection(db,'interclub_registrations'), (snap)=>{
     latestCounts = {};
     snap.forEach(d=>{ const r=d.data(); latestCounts[r.clubUid]=(latestCounts[r.clubUid]||0)+1; });
     render();
@@ -2831,18 +2884,25 @@ window.deleteClub = async function(uid){
   } catch(e){ alert('Erreur : '+e.message); }
 };
 let REG_PENDING_IC = [];
-window.loadPendingRegistrations = function(){
+window.loadPendingRegistrations = function(force){
   if(!isAdmin()) return;
   const listEl=document.getElementById('pendingRegList'); if(!listEl) return;
+  // Bouton 🔄 : (re)création forcée de l'écoute ; sinon simple affichage si déjà abonné
+  if(force===true && unsubPendingRegs){ unsubPendingRegs(); unsubPendingRegs=null; }
   if(unsubPendingRegs) { renderPendingRegistrationsIC(); return; } // déjà abonné
-  listEl.innerHTML='<div style="color:var(--muted);padding:10px 0">Chargement…</div>';
+  if(!REG_PENDING_IC.length) listEl.innerHTML='<div style="color:var(--muted);padding:10px 0">Chargement…</div>';
   const q = query(collection(db,'interclub_registrations'), where('status','==','pending'));
   unsubPendingRegs = onSnapshot(q, (snap)=>{
     REG_PENDING_IC = [];
     snap.forEach(d=> REG_PENDING_IC.push({id:d.id,...d.data()}));
     REG_PENDING_IC.sort((a,b)=> (a.createdAtMs||0)-(b.createdAtMs||0));
     renderPendingRegistrationsIC();
-  }, (e)=>{ listEl.innerHTML=`<div style="color:var(--red);padding:10px 0">Erreur : ${e.message}</div>`; });
+  }, (e)=>{
+    // L'écoute est terminée : on libère le verrou pour pouvoir se réabonner (et on réessaie seul)
+    unsubPendingRegs = null;
+    listEl.innerHTML=`<div style="color:var(--red);padding:10px 0">Erreur : ${e.message} — nouvelle tentative…</div>`;
+    setTimeout(()=>{ if(isAdmin() && !unsubPendingRegs) loadPendingRegistrations(); }, 5000);
+  });
 };
 function renderPendingRegistrationsIC(){
   const listEl=document.getElementById('pendingRegList'); if(!listEl) return;
@@ -4403,7 +4463,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
 
         <div style="display:flex;align-items:center;gap:12px;margin:20px 0 12px;flex-wrap:wrap">
           <div class="admin-panel-ttl" style="margin-bottom:0">⏳ Inscriptions en attente de validation</div>
-          <button onclick="loadPendingRegistrations()" style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px">🔄 Rafraîchir</button>
+          <button onclick="loadPendingRegistrations(true)" style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px">🔄 Rafraîchir</button>
           <button id="regValidateAllBtn" class="btn btn-g btn-sm" style="display:none" onclick="approveAllPending()">✓✓ Tout valider (dans la limite des places)</button>
         </div>
         <div id="pendingRegCap" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div>
