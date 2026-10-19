@@ -68,6 +68,8 @@ let unsubPendingRegs     = null; // inscriptions d'équipes en attente (admin) �
 let unsubClubCounts      = null; // compteurs d'inscriptions par club (admin) — temps réel
 let _specEntering        = false; // true pendant l'entrée en mode Live (chargement des données avant affichage)
 let unsubClubTeams       = null; // équipes du club connecté — temps réel
+let unsubClubReg         = null; // réglages d'inscription (dates, réserves) — temps réel
+let CLUB_TICK            = null; // rafraîchissement périodique de l'espace club
 let liveWatchIv     = null; // polling de secours (mobile en veille)
 let pendingSpecTarget = null;
 let tvCycleIv = null;   // intervalle d'alternance Résultats/Classement en mode Écran
@@ -83,6 +85,8 @@ const ST = {
   teams:[],        // [{id, name, club, p1, p2, lv, hall}]
   schedule:[],     // rounds avec sessions matin/après-midi
   results:{},
+  withdrawn:[],    // ids des équipes ABSENTES (forfait) : retirées du classement, +2 pts à l'adversaire
+  reg:{},          // inscriptions en ligne : {openAt, closeAt, reserveOn, reserveMax}
   activeRound:0,
   liveOpen:false,
   timerSec:0, timerRun:false, timerMode:'match', timerIv:null,
@@ -202,6 +206,8 @@ function unsubAll(){
   if(unsubPendingRegs){ unsubPendingRegs(); unsubPendingRegs=null; }
   if(unsubClubCounts){ unsubClubCounts(); unsubClubCounts=null; }
   if(unsubClubTeams)  { unsubClubTeams();   unsubClubTeams=null;   }
+  if(unsubClubReg)    { unsubClubReg();     unsubClubReg=null;     }
+  if(CLUB_TICK)       { clearInterval(CLUB_TICK); CLUB_TICK=null;      }
   stopLiveWatch();
   startLiveWatch();
 }
@@ -320,6 +326,7 @@ function startLiveWatch(){
   if(unsubLiveWatch) return;
   unsubLiveWatch = onSnapshot(doc(db,'interclub','status'), (snap)=>{
     if(!snap.exists()) return;
+    ST.reg = snap.data().reg || {}; syncRegForm();
     applyChronoMobileFlag(snap.data()); handleLiveOpenChange(snap.data().liveOpen === true);
   }, (e)=>{ console.warn('startLiveWatch', e); });
   if(!liveWatchIv){
@@ -355,6 +362,7 @@ function subscribeToTournamentPublic(onFirst){
     const data=snap.data();
     if(data.cfg)      ST.cfg      = data.cfg;
     if(data.teams)    ST.teams    = data.teams;
+    ST.withdrawn = Array.isArray(data.withdrawn) ? data.withdrawn : [];
     if(data.schedule) ST.schedule = data.schedule;
     if(data.activeRound!=null) ST.activeRound = data.activeRound;
     if(data.status!=null) ST.tStatus = data.status;
@@ -415,6 +423,7 @@ function subscribeToTournament(){
     const data=snap.data();
     if(data.cfg)      { ST.cfg = data.cfg; syncCfgForm(); }
     if(data.teams)    ST.teams    = data.teams;
+    ST.withdrawn = Array.isArray(data.withdrawn) ? data.withdrawn : [];
     if(data.schedule) ST.schedule = data.schedule;
     if(data.activeRound!=null) ST.activeRound = data.activeRound;
     if(data.status!=null) ST.tStatus = data.status;
@@ -427,6 +436,7 @@ function subscribeToTournament(){
     if(ST.page===5) renderFinal();
     if(ST.page==='TV') renderTVContent();
     if(unsubPendingRegs) renderPendingRegistrationsIC(); // quota / places restantes à jour
+    syncRegForm();
   });
 }
 function subscribeToResults(){
@@ -519,6 +529,7 @@ function teamLockId(clubUid, p1, p2){
 let CLUB_PROFILE = null;   // { clubName, maxTeams }
 let CLUB_TEAMS   = [];     // registrations Firestore du club connecté
 let CLUB_EDIT_ID = null;   // id de l'inscription en cours d'édition (ou null)
+let CLUB_REG     = {};     // réglages d'inscription : {openAt, closeAt, reserveOn, reserveMax}
 
 window.toggleClubExtraNav = function(show){
   const b1 = document.getElementById('clubExtraBtn');
@@ -551,6 +562,15 @@ window.returnToAppFromClub = function(){
 };
 function loadClubTeams(){
   const listEl = document.getElementById('clubTeamsList');
+  // Réglages d'inscription (dates, réserves) : stockés dans interclub/status (lisible par tous les comptes)
+  if(!unsubClubReg){
+    unsubClubReg = onSnapshot(doc(db,'interclub','status'), (snap)=>{
+      CLUB_REG = (snap.exists() && snap.data().reg) || {};
+      renderClubScreen();
+    }, (e)=>{ console.warn('club reg', e); CLUB_REG = {}; renderClubScreen(); });
+  }
+  // Les dates passent à l'heure juste sans recharger la page
+  if(!CLUB_TICK) CLUB_TICK = setInterval(()=>{ if(CLUB_EDIT_ID===null) renderClubScreen(); }, 30000);
   if(unsubClubTeams){ renderClubScreen(); return; } // déjà abonné
   if(listEl) listEl.innerHTML = '<div style="color:var(--muted);padding:10px 0">Chargement…</div>';
   const q = query(collection(db,'interclub_registrations'), where('clubUid','==',CURRENT_USER.uid));
@@ -561,15 +581,79 @@ function loadClubTeams(){
     renderClubScreen();
   }, (e)=>{ CLUB_TEAMS = []; renderClubScreen(); });
 }
+// Phase d'inscription : 'before' (pas encore ouvert) | 'open' | 'reserve' (fermé, réserves possibles) | 'closed'
+function regPhase(){
+  const r = CLUB_REG || {};
+  const now = Date.now();
+  const o = r.openAt  ? new Date(r.openAt).getTime()  : 0;
+  const c = r.closeAt ? new Date(r.closeAt).getTime() : 0;
+  if(o && now < o) return 'before';
+  if(c && now > c) return r.reserveOn ? 'reserve' : 'closed';
+  return 'open';
+}
+function fmtRegDT(v){
+  try { return new Date(v).toLocaleString('fr-FR',{ weekday:'long', day:'2-digit', month:'long', hour:'2-digit', minute:'2-digit' }); }
+  catch(e){ return v; }
+}
+function escAttr(v){ return String(v==null?'':v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
+window.clubStartEdit  = function(id){ CLUB_EDIT_ID = id; renderClubScreen(); };
+window.clubCancelEdit = function(){ CLUB_EDIT_ID = null; renderClubScreen(); };
+
 function renderClubScreen(){
-  const quotaEl = document.getElementById('clubQuota');
-  const used = CLUB_TEAMS.length;
+  const phase = regPhase();
+  const reserveMax = Math.max(0, +(CLUB_REG && CLUB_REG.reserveMax) || 0);
+  const normalTeams  = CLUB_TEAMS.filter(t=>!t.reserve);
+  const reserveTeams = CLUB_TEAMS.filter(t=> t.reserve);
+  const used = normalTeams.length;
   const max  = CLUB_PROFILE ? CLUB_PROFILE.maxTeams : 0;
-  if(quotaEl) quotaEl.textContent = `${used} / ${max} équipe${max>1?'s':''} inscrite${used>1?'s':''}`;
+
+  const quotaEl = document.getElementById('clubQuota');
+  if(quotaEl){
+    let txt = `${used} / ${max} équipe${max>1?'s':''} inscrite${used>1?'s':''}`;
+    if(CLUB_REG && CLUB_REG.reserveOn) txt += ` · ${reserveTeams.length} / ${reserveMax} en réserve`;
+    quotaEl.textContent = txt;
+  }
+
+  // Bandeau d'information sur la période d'inscription
+  const info = document.getElementById('clubRegInfo');
+  if(info){
+    let html = '', bg = 'rgba(80,140,220,.12)', col = 'var(--ink)';
+    if(phase==='before'){
+      html = `⏳ Les inscriptions en ligne ouvriront le <strong>${fmtRegDT(CLUB_REG.openAt)}</strong>.`;
+      bg = 'rgba(230,162,60,.15)';
+    } else if(phase==='open'){
+      html = CLUB_REG.closeAt
+        ? `🟢 Inscriptions ouvertes jusqu'au <strong>${fmtRegDT(CLUB_REG.closeAt)}</strong>.`
+        : '';
+      bg = 'rgba(30,140,69,.12)';
+    } else if(phase==='reserve'){
+      html = `🔒 Les inscriptions sont closes depuis le <strong>${fmtRegDT(CLUB_REG.closeAt)}</strong>.<br>🔄 Vous pouvez inscrire jusqu'à <strong>${reserveMax}</strong> équipe${reserveMax>1?'s':''} <strong>de réserve</strong> : elle${reserveMax>1?'s':''} ne serai${reserveMax>1?'ent':'t'} validée${reserveMax>1?'s':''} par l'organisateur qu'en cas de désistement ou s'il reste des places libres.`;
+      bg = 'rgba(80,140,220,.12)';
+    } else {
+      html = `🔒 Les inscriptions en ligne sont closes depuis le <strong>${fmtRegDT(CLUB_REG.closeAt)}</strong>.`;
+      bg = 'rgba(200,60,60,.10)';
+    }
+    info.style.display = html ? '' : 'none';
+    info.style.background = bg; info.style.color = col;
+    info.innerHTML = html;
+  }
+
+  // Formulaire d'ajout selon la phase
   const formWrap = document.getElementById('clubAddForm');
-  if(formWrap) formWrap.style.display = (used < max) ? '' : 'none';
-  const fullMsg = document.getElementById('clubQuotaFullMsg');
-  if(fullMsg) fullMsg.style.display = (used >= max) ? '' : 'none';
+  const fullMsg  = document.getElementById('clubQuotaFullMsg');
+  const titleEl  = document.getElementById('clubAddTitle');
+  let showForm = false, fullTxt = '';
+  if(phase==='open'){
+    showForm = used < max;
+    if(!showForm) fullTxt = 'Quota d\'équipes atteint — contactez l\'organisateur pour l\'augmenter.';
+    if(titleEl) titleEl.textContent = '➕ Inscrire une équipe';
+  } else if(phase==='reserve'){
+    showForm = reserveTeams.length < reserveMax;
+    if(!showForm) fullTxt = 'Quota d\'équipes de réserve atteint pour votre club.';
+    if(titleEl) titleEl.textContent = '➕ Inscrire une équipe de réserve';
+  }
+  if(formWrap) formWrap.style.display = showForm ? '' : 'none';
+  if(fullMsg){ fullMsg.style.display = fullTxt ? '' : 'none'; fullMsg.textContent = fullTxt; }
 
   const listEl = document.getElementById('clubTeamsList');
   if(!listEl) return;
@@ -580,109 +664,144 @@ function renderClubScreen(){
   listEl.innerHTML = CLUB_TEAMS.map(t=>{
     const badge = t.status==='imported'
       ? '<span style="color:var(--grn);font-size:12px;font-weight:700">✅ Validée — intégrée au tournoi</span>'
-      : '<span style="color:#e6a23c;font-size:12px;font-weight:700">⏳ En attente de validation</span>';
+      : (t.reserve
+          ? '<span style="color:#4a86d8;font-size:12px;font-weight:700">🔄 Réserve — en attente</span>'
+          : '<span style="color:#e6a23c;font-size:12px;font-weight:700">⏳ En attente de validation</span>');
     const locked = t.status==='imported';
     if(CLUB_EDIT_ID === t.id){
       return `<div class="club-team-card" style="border:1px solid var(--bdr2);border-radius:10px;padding:12px;margin-bottom:10px">
         <div style="display:flex;flex-direction:column;gap:8px">
-          <input type="text" id="clubEdit_name_${t.id}" value="${(t.teamName||'').replace(/"/g,'&quot;')}" placeholder="Nom de l'équipe">
+          <input type="text" id="clubEdit_name_${t.id}" value="${escAttr(t.teamName)}" placeholder="Nom de l'équipe">
           <div style="display:flex;gap:8px">
-            <input type="text" id="clubEdit_p1_${t.id}" value="${(t.p1||'').replace(/"/g,'&quot;')}" placeholder="Joueur 1" style="flex:1">
-            <input type="text" id="clubEdit_p2_${t.id}" value="${(t.p2||'').replace(/"/g,'&quot;')}" placeholder="Joueur 2" style="flex:1">
+            <input type="text" id="clubEdit_p1_${t.id}" value="${escAttr(t.p1)}" placeholder="Joueur 1" style="flex:1">
+            <input type="text" id="clubEdit_p2_${t.id}" value="${escAttr(t.p2)}" placeholder="Joueur 2" style="flex:1">
           </div>
-          <input type="number" id="clubEdit_lv_${t.id}" value="${t.lv||3}" min="1" max="5" placeholder="Niveau (1-5)">
+          <select id="clubEdit_lv_${t.id}">${lvOptionsHTML(t.lv)}</select>
           <div style="display:flex;gap:8px">
             <button class="btn btn-g btn-sm" onclick="clubSaveTeamEdit('${t.id}')">✓ Enregistrer</button>
-            <button class="btn btn-ghost btn-sm" onclick="CLUB_EDIT_ID=null;renderClubScreen()">Annuler</button>
+            <button class="btn btn-ghost btn-sm" onclick="clubCancelEdit()">Annuler</button>
           </div>
+          <div id="clubEditMsg_${t.id}" style="font-size:13px;min-height:16px;color:var(--red)"></div>
         </div>
       </div>`;
     }
     return `<div class="club-team-card" style="border:1px solid var(--bdr);border-radius:10px;padding:12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
       <div>
         <div style="font-weight:700">${t.teamName||'—'}</div>
-        <div style="color:var(--muted);font-size:13px">${t.p1||'—'} &amp; ${t.p2||'—'} · Niveau ${t.lv||3}</div>
+        <div style="color:var(--muted);font-size:13px">${t.p1||'—'} &amp; ${t.p2||'—'} · Niveau ${normLv(t.lv)} · ${lvLabel(t.lv)}</div>
         <div style="margin-top:4px">${badge}</div>
       </div>
       ${locked ? '' : `<div style="display:flex;gap:8px">
-        <button class="btn btn-ghost btn-sm" onclick="CLUB_EDIT_ID='${t.id}';renderClubScreen()">✏️ Modifier</button>
+        <button class="btn btn-ghost btn-sm" onclick="clubStartEdit('${t.id}')">✏️ Modifier</button>
         <button class="btn btn-ghost btn-sm" style="border-color:var(--red);color:var(--red)" onclick="clubDeleteTeam('${t.id}')">🗑 Supprimer</button>
       </div>`}
     </div>`;
   }).join('');
 }
+
+// Deux inscriptions du même club avec la même paire de joueurs = doublon.
+// On compare avec les inscriptions RÉELLEMENT présentes (pas avec d'anciens verrous
+// orphelins laissés par une suppression / modification).
+function clubPairExists(p1, p2, ignoreId){
+  const key = [normalizeName(p1), normalizeName(p2)].sort().join('__');
+  return CLUB_TEAMS.some(t=> t.id!==ignoreId && [normalizeName(t.p1), normalizeName(t.p2)].sort().join('__')===key);
+}
+// Réserve un verrou anti-doublon (protège des double-clics / double onglets).
+// Si un ancien verrou orphelin bloque (suppression refusée par les règles Firestore
+// par exemple), on le recycle, ou à défaut on en crée un nouveau avec un suffixe.
+async function acquireTeamLock(p1, p2){
+  const uid = CURRENT_USER.uid;
+  const base = teamLockId(uid, p1, p2);
+  const data = ()=>({ clubUid: uid, p1, p2, createdAtMs: Date.now() });
+  try { await setDoc(doc(db,'interclub_team_locks',base), data()); return base; } catch(e){}
+  try { await deleteDoc(doc(db,'interclub_team_locks',base)); await setDoc(doc(db,'interclub_team_locks',base), data()); return base; } catch(e){}
+  const alt = base + '__r' + Date.now().toString(36);
+  try { await setDoc(doc(db,'interclub_team_locks',alt), data()); return alt; } catch(e){}
+  return null;
+}
+async function releaseTeamLock(lockId){
+  if(!lockId) return;
+  try { await deleteDoc(doc(db,'interclub_team_locks',lockId)); } catch(e){ /* pas grave : un verrou orphelin est désormais recyclé */ }
+}
 window.clubAddTeam = async function(){
   if(!isClub()) return;
-  const used = CLUB_TEAMS.length, max = CLUB_PROFILE ? CLUB_PROFILE.maxTeams : 0;
-  if(used >= max){ alert('Quota d\'équipes atteint pour votre club.'); return; }
+  const phase = regPhase();
+  const msg  = document.getElementById('clubAddMsg');
+  const say = (t,c)=>{ if(msg){ msg.textContent=t; msg.style.color=c; } };
+  if(phase==='before' || phase==='closed'){ say('Les inscriptions en ligne ne sont pas ouvertes actuellement.','var(--red)'); renderClubScreen(); return; }
+  const reserve = phase==='reserve';
+  const max = CLUB_PROFILE ? CLUB_PROFILE.maxTeams : 0;
+  const reserveMax = Math.max(0, +(CLUB_REG && CLUB_REG.reserveMax) || 0);
+  if(!reserve && CLUB_TEAMS.filter(t=>!t.reserve).length >= max){ alert('Quota d\'équipes atteint pour votre club.'); return; }
+  if(reserve && CLUB_TEAMS.filter(t=>t.reserve).length >= reserveMax){ alert('Quota d\'équipes de réserve atteint pour votre club.'); return; }
   const name = document.getElementById('club_t_name').value.trim();
   const p1   = document.getElementById('club_t_p1').value.trim();
   const p2   = document.getElementById('club_t_p2').value.trim();
-  const lv   = +document.getElementById('club_t_lv').value || 3;
-  const msg  = document.getElementById('clubAddMsg');
-  if(!name||!p1||!p2){ if(msg){ msg.textContent='Nom, Joueur 1 et Joueur 2 sont obligatoires.'; msg.style.color='var(--red)'; } return; }
+  const lv   = normLv(document.getElementById('club_t_lv').value);
+  if(!name||!p1||!p2){ say('Nom, Joueur 1 et Joueur 2 sont obligatoires.','var(--red)'); return; }
+  if(clubPairExists(p1,p2,null)){ say('❌ Cette paire de joueurs est déjà inscrite pour votre club (en attente ou déjà validée).','var(--red)'); return; }
   const submitBtn = document.getElementById('clubAddBtn');
   if(submitBtn){ if(submitBtn.disabled) return; submitBtn.disabled = true; }
   try {
-    // Anti-doublon FIABLE (résiste aux double-clics) : on réserve d'abord un
-    // verrou basé sur la paire de joueurs pour ce club. Si le verrou existe
-    // déjà, Firestore refuse l'écriture (règles : "create" autorisé mais
-    // pas "update" sur interclub_team_locks) → doublon détecté à coup sûr.
-    const lockId = teamLockId(CURRENT_USER.uid, p1, p2);
-    try {
-      await setDoc(doc(db,'interclub_team_locks',lockId), { clubUid: CURRENT_USER.uid, p1, p2, createdAtMs: Date.now() });
-    } catch(lockErr){
-      if(msg){ msg.textContent='❌ Cette paire de joueurs est déjà inscrite pour votre club (en attente ou déjà validée).'; msg.style.color='var(--red)'; }
-      return;
-    }
-    await addDoc(collection(db,'interclub_registrations'),{
+    const lockId = await acquireTeamLock(p1, p2);
+    if(!lockId){ say('❌ Impossible de réserver cette paire de joueurs. Réessayez.','var(--red)'); return; }
+    const payload = {
       clubUid: CURRENT_USER.uid,
       clubName: CLUB_PROFILE.clubName,
       teamName: name, p1, p2, lv, teamLockId: lockId,
       status: 'pending',
       createdAtMs: Date.now(),
       createdAt: serverTimestamp()
-    });
+    };
+    if(reserve) payload.reserve = true;
+    try { await addDoc(collection(db,'interclub_registrations'), payload); }
+    catch(e){ await releaseTeamLock(lockId); throw e; }
     ['club_t_name','club_t_p1','club_t_p2'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
     const lvEl=document.getElementById('club_t_lv'); if(lvEl) lvEl.value='3';
-    if(msg){ msg.textContent='✅ Équipe inscrite, en attente de validation par l\'organisateur.'; msg.style.color='var(--grn)'; setTimeout(()=>{ msg.textContent=''; },4000); }
-  } catch(e){ if(msg){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; } }
+    say(reserve ? '✅ Équipe de réserve inscrite, en attente de validation par l\'organisateur.' : '✅ Équipe inscrite, en attente de validation par l\'organisateur.','var(--grn)');
+    setTimeout(()=>{ if(msg) msg.textContent=''; },4000);
+  } catch(e){ say('❌ '+e.message,'var(--red)'); }
   finally { if(submitBtn) submitBtn.disabled = false; }
 };
 window.clubSaveTeamEdit = async function(id){
+  const errEl = document.getElementById(`clubEditMsg_${id}`);
+  const fail = (t)=>{ if(errEl) errEl.textContent = t; else alert(t); };
   const name = document.getElementById(`clubEdit_name_${id}`).value.trim();
   const p1   = document.getElementById(`clubEdit_p1_${id}`).value.trim();
   const p2   = document.getElementById(`clubEdit_p2_${id}`).value.trim();
-  const lv   = +document.getElementById(`clubEdit_lv_${id}`).value || 3;
-  if(!name||!p1||!p2){ alert('Nom, Joueur 1 et Joueur 2 sont obligatoires.'); return; }
+  const lv   = normLv(document.getElementById(`clubEdit_lv_${id}`).value);
+  if(!name||!p1||!p2){ fail('Nom, Joueur 1 et Joueur 2 sont obligatoires.'); return; }
   try {
     const existing = CLUB_TEAMS.find(t=>t.id===id);
-    const newLockId = teamLockId(CURRENT_USER.uid, p1, p2);
     const update = { teamName:name, p1, p2, lv };
-    if(!existing || existing.teamLockId !== newLockId){
-      // La paire de joueurs a changé : on réserve le nouveau verrou (peut
-      // échouer si cette paire est déjà inscrite ailleurs pour ce club),
-      // puis on libère l'ancien.
-      try { await setDoc(doc(db,'interclub_team_locks',newLockId), { clubUid: CURRENT_USER.uid, p1, p2, createdAtMs: Date.now() }); }
-      catch(lockErr){ alert('Cette paire de joueurs est déjà inscrite pour votre club.'); return; }
-      if(existing && existing.teamLockId){ try { await deleteDoc(doc(db,'interclub_team_locks',existing.teamLockId)); } catch(e){} }
-      update.teamLockId = newLockId;
+    const pairChanged = !existing || [normalizeName(existing.p1),normalizeName(existing.p2)].sort().join('__') !== [normalizeName(p1),normalizeName(p2)].sort().join('__');
+    let newLock = null;
+    if(pairChanged){
+      if(clubPairExists(p1,p2,id)){ fail('Cette paire de joueurs est déjà inscrite pour votre club.'); return; }
+      newLock = await acquireTeamLock(p1, p2);
+      if(!newLock){ fail('Impossible de réserver cette paire de joueurs. Réessayez.'); return; }
+      update.teamLockId = newLock;
     }
-    await updateDoc(doc(db,'interclub_registrations',id), update);
+    try { await updateDoc(doc(db,'interclub_registrations',id), update); }
+    catch(e){ if(newLock) await releaseTeamLock(newLock); throw e; }
+    if(pairChanged && existing && existing.teamLockId) await releaseTeamLock(existing.teamLockId);
     CLUB_EDIT_ID = null;
-  } catch(e){ alert('Erreur : '+e.message); }
+    renderClubScreen();
+  } catch(e){ fail('Erreur : '+e.message); }
 };
 window.clubDeleteTeam = async function(id){
   if(!confirm('Supprimer cette équipe de votre inscription ?')) return;
   try {
     const t = CLUB_TEAMS.find(x=>x.id===id);
     await deleteDoc(doc(db,'interclub_registrations',id));
-    if(t && t.teamLockId){ try { await deleteDoc(doc(db,'interclub_team_locks',t.teamLockId)); } catch(e){} }
+    if(t) await releaseTeamLock(t.teamLockId);
   }
   catch(e){ alert('Erreur : '+e.message); }
 };
 window.clubLogout = async function(){
-  CLUB_PROFILE = null; CLUB_TEAMS = []; CLUB_EDIT_ID = null;
+  CLUB_PROFILE = null; CLUB_TEAMS = []; CLUB_EDIT_ID = null; CLUB_REG = {};
+  if(CLUB_TICK){ clearInterval(CLUB_TICK); CLUB_TICK = null; }
+  if(unsubClubReg){ unsubClubReg(); unsubClubReg = null; }
   USER_ROLE = null; USER_ROLES = []; CURRENT_USER = null;
   if(auth.currentUser) await signOut(auth);
   else showLogin();
@@ -1149,6 +1268,24 @@ function shuffle(arr){
 function tObj(id){ return ST.teams.find(x=>x.id===id); }
 function tName(id){ const t=tObj(id); return t?t.name:'?'; }
 function tClub(id){ const t=tObj(id); return t?t.club:''; }
+// ── Niveaux : 3 niveaux seulement (1 / 3 / 5) ──
+const LV_LABELS = {1:'Débutant', 3:'Intermédiaire', 5:'Confirmé'};
+function normLv(v){ v=+v||3; if(v<=1) return 1; if(v>=5) return 5; return 3; } // anciens niveaux 2 et 4 → 3
+function lvLabel(v){ return LV_LABELS[normLv(v)]; }
+function lvOptionsHTML(sel){
+  const n = normLv(sel);
+  return [1,3,5].map(k=>`<option value="${k}" ${k===n?'selected':''}>${'⭐'.repeat(k)} ${k} - ${LV_LABELS[k]}</option>`).join('');
+}
+// ── Équipes absentes (forfait) ──
+function isWd(id){ return Array.isArray(ST.withdrawn) && ST.withdrawn.includes(id); }
+function isFF(m){ return !!m && (isWd(m.tA) || isWd(m.tB)); }
+function ffBanner(m){
+  const wa=isWd(m.tA), wb=isWd(m.tB);
+  const st='grid-column:1/-1;font-size:12px;font-weight:700;padding:5px 10px;border-radius:6px;background:rgba(200,60,60,.10);color:var(--red);text-align:center';
+  if(wa&&wb) return `<div style="${st}">🚫 Les deux équipes sont absentes — match non joué</div>`;
+  const win = wa ? m.tB : m.tA, lose = wa ? m.tA : m.tB;
+  return `<div style="${st}">🚫 FORFAIT — ${tName(lose)} est absente · ${tName(win)} reçoit 2 pts</div>`;
+}
 function tPlayers(id){ const t=tObj(id); return t&&(t.p1||t.p2)?[t.p1,t.p2].filter(Boolean).join(' & '):''; }
 
 function makeRoundMatches(active, maxCourts, oppCount){
@@ -1547,7 +1684,8 @@ function renderTeamsSpecPage(){
               else{result='🟡';color='var(--ylw)';}
             }
             rows.push({type:'match',time:rd.roundTime,wave:rd.waveLabel||('V'+(r+1)),session:rd.session,
-              court:`T${mi+1}${h.label?' '+h.label:''}`,opp,myS,oppS,done,result,color});
+              court:`T${mi+1}${h.label?' '+h.label:''}`,opp,myS,oppS,done,result,color,
+              ff:(isWd(t.id)?'me':(isWd(opp)?'opp':''))});
           }
         });
       });
@@ -1560,12 +1698,12 @@ function renderTeamsSpecPage(){
         <td style="font-weight:700;color:var(--blu)">${row.time}</td>
         <td style="color:var(--dim);font-size:11px">${row.court}</td>
         <td style="font-size:11px"><strong>${oppObj?oppObj.name:row.opp}</strong>${oppObj&&oppObj.club&&oppObj.club!=='—'?`<br><span style='font-size:9px;color:var(--muted)'>${oppObj.club}</span>`:''}${oppObj?`<br><span style='font-size:9px;color:var(--dim)'>👤 ${oppObj.p1} &amp; ${oppObj.p2}</span>`:''}</td>
-        <td style="text-align:center;color:${row.color};font-size:12px">${row.done?`<strong>${row.myS}–${row.oppS}</strong> ${row.result}`:'<span style="color:var(--dim)">–</span>'}</td>
+        <td style="text-align:center;color:${row.color};font-size:12px">${row.ff?(row.ff==='opp'?'<strong style="color:var(--grn)">Forfait adv. · +2</strong>':'<span style="color:var(--red)">Absente</span>'):(row.done?`<strong>${row.myS}–${row.oppS}</strong> ${row.result}`:'<span style="color:var(--dim)">–</span>')}</td>
       </tr>`;
     }).join('');
     return `<div style="background:var(--s1);border:1px solid var(--bdr);border-radius:10px;padding:12px;cursor:pointer" onclick="printTeamScheduleSingle('${t.id}')">
       <div style="font-family:'Oswald',sans-serif;font-size:16px;font-weight:700;color:var(--ink);margin-bottom:2px">${t.name}
-        ${t.club&&t.club!=='—'?`<span class="t-club-badge">${t.club}</span>`:''}
+        ${t.club&&t.club!=='—'?`<span class="t-club-badge">${t.club}</span>`:''}${isWd(t.id)?' <span style="font-size:11px;color:var(--red)">🚫 ABSENTE</span>':''}
       </div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:8px">👤 ${t.p1} &amp; ${t.p2}</div>
       ${rows.length?`<table style="width:100%;border-collapse:collapse;font-size:11px">
@@ -1611,10 +1749,10 @@ function renderTeams(){
     <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid var(--bdr);font-size:13px">
       <span style="font-family:'Oswald',sans-serif;font-size:15px;color:var(--dim);min-width:26px">${i+1}</span>
       <div style="flex:1;min-width:0">
-        <div style="font-weight:700;color:var(--ink)">${t.name} ${t.club&&t.club!=='—'?`<span class="t-club-badge">${t.club}</span>`:''}</div>
-        <div style="font-size:11px;color:var(--muted)">${t.p1} · ${t.p2} · ${'⭐'.repeat(t.lv||1)}</div>
+        <div style="font-weight:700;color:var(--ink)${isWd(t.id)?';text-decoration:line-through;opacity:.6':''}">${t.name} ${t.club&&t.club!=='—'?`<span class="t-club-badge">${t.club}</span>`:''}${isWd(t.id)?' <span style="font-size:11px;color:var(--red);text-decoration:none;display:inline-block">🚫 ABSENTE</span>':''}</div>
+        <div style="font-size:11px;color:var(--muted)">${t.p1} · ${t.p2} · ${'⭐'.repeat(normLv(t.lv))} ${lvLabel(t.lv)}</div>
       </div>
-      ${isAdmin()?`<button onclick="openEditTeam('${t.id}')" style="background:none;border:1px solid var(--blu);color:var(--blu);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px;margin-right:4px">✏️</button><button onclick="removeTeam('${t.id}')" style="background:none;border:1px solid var(--red);color:var(--red);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px">✕</button>`:''}
+      ${isAdmin()?`${ST.schedule.length?`<button onclick="toggleWithdrawn('${t.id}')" title="${isWd(t.id)?'Réintégrer l\'équipe':'Marquer absente (forfait)'}" style="background:none;border:1px solid var(--ylw);color:var(--ylw);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px;margin-right:4px">${isWd(t.id)?'↩️':'🚫'}</button>`:''}<button onclick="openEditTeam('${t.id}')" style="background:none;border:1px solid var(--blu);color:var(--blu);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px;margin-right:4px">✏️</button><button onclick="removeTeam('${t.id}')" style="background:none;border:1px solid var(--red);color:var(--red);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px">✕</button>`:''}
     </div>`).join('');
 }
 
@@ -1629,7 +1767,7 @@ window.openEditTeam = function(id){
   document.getElementById('edit_t_club').value = t.club==='—'?'':t.club;
   document.getElementById('edit_t_p1').value = t.p1;
   document.getElementById('edit_t_p2').value = t.p2;
-  document.getElementById('edit_t_lv').value = t.lv||3;
+  document.getElementById('edit_t_lv').value = normLv(t.lv);
   document.getElementById('editTeamOverlay').style.display='flex';
 };
 
@@ -1673,11 +1811,73 @@ window.addTeam = async function(){
   updateFwdBtn();
 };
 
+// ══════════════════════════════════════════════════════════
+// ÉQUIPES ABSENTES (forfait) — sans refaire la programmation
+// ══════════════════════════════════════════════════════════
+function refreshAfterWithdrawal(){
+  try { renderTeams(); } catch(e){}
+  try { updateFwdBtn(); } catch(e){}
+  if(ST.schedule.length){
+    try { renderMatches(); renderMiniStandings(); renderRoundTabs(); checkDone(); } catch(e){}
+    if(ST.page===5) { try { renderFinal(); } catch(e){} }
+    if(ST.page==='TV') { try { renderTVContent(); } catch(e){} }
+  }
+  if(document.getElementById('absOverlay') && document.getElementById('absOverlay').style.display!=='none') renderAbsModal();
+}
+window.toggleWithdrawn = async function(id){
+  if(!isAdmin()) return;
+  const t = tObj(id); if(!t) return;
+  const was = isWd(id);
+  const txt = was
+    ? `Réintégrer « ${t.name} » dans le classement ?\n\nSes matchs redeviennent normaux et les 2 points de forfait de ses adversaires sont retirés.`
+    : `Marquer « ${t.name} » comme ABSENTE ?\n\n• Elle est retirée du classement\n• Chacun de ses adversaires reçoit 2 points (match non joué)\n• Le programme du tournoi n'est PAS modifié`;
+  if(!confirm(txt)) return;
+  const list = Array.isArray(ST.withdrawn) ? ST.withdrawn : [];
+  ST.withdrawn = was ? list.filter(x=>x!==id) : [...list, id];
+  const ok = await saveTournament({ withdrawn: ST.withdrawn });
+  if(!ok) alert('Échec de l\'enregistrement (voir la console).');
+  refreshAfterWithdrawal();
+};
+window.openAbsModal = function(){
+  if(!isAdmin()) return;
+  let ov = document.getElementById('absOverlay');
+  if(!ov){
+    ov = document.createElement('div');
+    ov.id = 'absOverlay';
+    ov.style.cssText = 'position:fixed;inset:0;z-index:850;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:16px';
+    document.body.appendChild(ov);
+  }
+  ov.style.display = 'flex';
+  renderAbsModal();
+};
+window.closeAbsModal = function(){ const ov=document.getElementById('absOverlay'); if(ov) ov.style.display='none'; };
+function renderAbsModal(){
+  const ov = document.getElementById('absOverlay'); if(!ov) return;
+  const teams = [...ST.teams].sort((a,b)=>String(a.name).localeCompare(String(b.name),'fr'));
+  const rows = teams.map(t=>`
+    <div style="display:flex;align-items:center;gap:10px;padding:8px 4px;border-bottom:1px solid var(--bdr);font-size:13px">
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;${isWd(t.id)?'text-decoration:line-through;opacity:.6':''}">${t.name} ${t.club&&t.club!=='—'?`<span class="t-club-badge">${t.club}</span>`:''}</div>
+        <div style="font-size:11px;color:var(--muted)">${t.p1} · ${t.p2}</div>
+      </div>
+      <button onclick="toggleWithdrawn('${t.id}')" style="background:none;border:1px solid ${isWd(t.id)?'var(--grn)':'var(--red)'};color:${isWd(t.id)?'var(--grn)':'var(--red)'};border-radius:6px;padding:4px 10px;cursor:pointer;font-size:12px;white-space:nowrap">${isWd(t.id)?'↩️ Réintégrer':'🚫 Absente'}</button>
+    </div>`).join('');
+  ov.innerHTML = `<div style="background:var(--s1);border:1px solid var(--bdr2);border-radius:14px;padding:18px;width:100%;max-width:460px;max-height:85vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,.4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+      <div style="font-family:'Oswald',sans-serif;font-size:16px;letter-spacing:.8px;color:var(--ink)">🚫 Équipes absentes</div>
+      <button onclick="closeAbsModal()" style="background:none;border:none;color:var(--muted);font-size:22px;cursor:pointer;padding:0 6px">✕</button>
+    </div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.4">Une équipe absente est retirée du classement et chacun de ses adversaires reçoit 2 points pour le match non joué. Le programme reste inchangé.</div>
+    <div style="overflow-y:auto;flex:1">${rows||'<div style="color:var(--muted);padding:10px">Aucune équipe.</div>'}</div>
+  </div>`;
+}
+
 window.removeTeam = async function(id){
   if(!isAdmin()) return;
   if(!confirm('Supprimer cette équipe ?')) return;
   ST.teams = ST.teams.filter(t=>t.id!==id);
-  await saveTournament({ teams: ST.teams });
+  ST.withdrawn = (ST.withdrawn||[]).filter(x=>x!==id);
+  await saveTournament({ teams: ST.teams, withdrawn: ST.withdrawn });
   renderTeams();
   updateFwdBtn();
 };
@@ -1685,8 +1885,8 @@ window.removeTeam = async function(id){
 window.clearTeams = async function(){
   if(!isAdmin()) return;
   if(!confirm('Vider toutes les équipes ?')) return;
-  ST.teams = [];
-  await saveTournament({ teams: [] });
+  ST.teams = []; ST.withdrawn = [];
+  await saveTournament({ teams: [], withdrawn: [] });
   renderTeams();
   updateFwdBtn();
 };
@@ -1707,7 +1907,7 @@ window.autoFillTeams = async function(){
       club,
       p1:  'Joueur '+(i*2+1),
       p2:  'Joueur '+(i*2+2),
-      lv:  (i%5)+1
+      lv:  [1,3,5][i%3]
     });
   }
   await saveTournament({ teams: ST.teams });
@@ -1733,7 +1933,9 @@ window.regenerate = async function(){
     if(!(await clearAllResults())) return;
   }
   ST.schedule = []; // force rebuild
-  if(buildSchedule()){ await saveTournament({ schedule: ST.schedule, activeRound:0 }); renderGen(); }
+  // Nouveau planning = toutes les équipes de la liste rejouent : on remet les absences à zéro
+  ST.withdrawn = [];
+  if(buildSchedule()){ await saveTournament({ schedule: ST.schedule, activeRound:0, withdrawn: [] }); renderGen(); }
 };
 window.startTournament = async function(){
   if(!isAdmin()) return;
@@ -1751,13 +1953,13 @@ window.newTournament = async function(){
   if(!isAdmin()){ alert('Admin uniquement.'); return; }
   if(!confirm('Nouveau tournoi ? Toutes les données seront perdues.')) return;
   clearInterval(ST.timerIv);
-  ST.teams=[]; ST.schedule=[]; ST.results={}; ST.activeRound=0;
+  ST.teams=[]; ST.schedule=[]; ST.results={}; ST.activeRound=0; ST.withdrawn=[];
   ST.timerSec=0; ST.timerRun=false; ST.rulesOpen=false;
   document.getElementById('ruleBtn').textContent='📋 Règlement';
   ST.timers = timersDefault();
   await clearAllResults();
   ST.tStatus='setup';
-  await saveTournament({ cfg:ST.cfg, teams:[], schedule:[], activeRound:0, status:'setup' });
+  await saveTournament({ cfg:ST.cfg, teams:[], schedule:[], activeRound:0, status:'setup', withdrawn:[] });
   await saveTimers(ST.timers);
   renderTeams(); goTo(1); onCfgChange();
 };
@@ -1879,7 +2081,8 @@ function renderRoundTabs(){
 function isRoundDone(r){
   const rd=ST.schedule[r]; if(!rd) return false;
   const halls=rd.halls;
-  return halls.every(h=>h.matches.every((_,mi)=>{
+  return halls.every(h=>h.matches.every((m,mi)=>{
+    if(isFF(m)) return true; // forfait : rien à saisir
     const flatMi = getGlobalMatchIdx(r, h, mi);
     const res=getRes(r, flatMi); return res.ga!==''&&res.gb!=='';
   }));
@@ -1904,7 +2107,7 @@ function renderMatches(){
   const round=ST.schedule[ST.activeRound]; const el=document.getElementById('mList'); if(!round||!el) return;
   const mkTeamCard=(tId)=>{
     const t=tObj(tId); if(!t) return '?';
-    return `<div><div class="mt-nm">${t.name}</div><div class="mt-detail">${t.club!=='—'?`<span class="t-club-badge">${t.club}</span>`:''} ${t.p1} · ${t.p2}</div></div>`;
+    return `<div><div class="mt-nm" ${isWd(tId)?'style="text-decoration:line-through;opacity:.55"':''}>${t.name}${isWd(tId)?' <span style="font-size:11px;color:var(--red);text-decoration:none;display:inline-block">🚫 absente</span>':''}</div><div class="mt-detail">${t.club!=='—'?`<span class="t-club-badge">${t.club}</span>`:''} ${t.p1} · ${t.p2}</div></div>`;
   };
   // Bandeau horaire de la vague
   const cfg=ST.cfg||{};
@@ -1917,16 +2120,20 @@ function renderMatches(){
   </div>`:'';
   const halls=round.halls;
   let matchOffset=0;
-  el.innerHTML=timeHeader+halls.map((h,hi)=>{
+  const nWd=(ST.withdrawn||[]).length;
+  const absBar=isAdmin()?`<div style="margin-bottom:10px"><button class="btn btn-ghost btn-sm" onclick="openAbsModal()" style="${nWd?'border-color:var(--red);color:var(--red)':''}">🚫 Équipes absentes${nWd?' ('+nWd+')':''}</button></div>`:'';
+  el.innerHTML=absBar+timeHeader+halls.map((h,hi)=>{
     const hallHtml=h.matches.map((m,localMi)=>{
       const globalMi = matchOffset + localMi;
       const res=getRes(ST.activeRound, globalMi);
-      const done=res.ga!==''&&res.gb!=='';
-      const aW=done&&res.ga>res.gb, bW=done&&res.gb>res.ga;
-      const numpadBtn = isScorer()
+      const ff=isFF(m);
+      const done=ff||(res.ga!==''&&res.gb!=='');
+      const aW=!ff&&done&&res.ga>res.gb, bW=!ff&&done&&res.gb>res.ga;
+      const numpadBtn = (isScorer()&&!ff)
         ? `<button onclick="openNumpad(${ST.activeRound},${globalMi},'${tName(m.tA).replace(/'/g,"\\'") }','${tName(m.tB).replace(/'/g,"\\'")}' )" title="Pavé numérique" style="background:var(--s2);border:1px solid var(--bdr2);color:var(--ink2);border-radius:6px;padding:4px 10px;cursor:pointer;font-size:18px;margin-top:6px;touch-action:manipulation">📱</button>`
         : '';
       return `<div class="mc ${done?'done-mc':''}">
+        ${ff?ffBanner(m):''}
         <div>
           <div class="mt-court">${h.label?h.label+' · ':''}TERRAIN ${localMi+1}</div>
           ${mkTeamCard(m.tA)}
@@ -1935,15 +2142,15 @@ function renderMatches(){
         <input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="2"
           class="sinp ${aW?'win-s':''}" value="${res.ga!==''?res.ga:''}" placeholder="–"
           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-          ${isScorer()?`onfocus="scoreFocus(this)" oninput="scoreInput(this,${ST.activeRound},${globalMi},'ga')" onkeydown="scoreNav(event,this)"`:'readonly'}
-          style="${!isScorer()?'cursor:default;opacity:.6':''}"
+          ${(isScorer()&&!ff)?`onfocus="scoreFocus(this)" oninput="scoreInput(this,${ST.activeRound},${globalMi},'ga')" onkeydown="scoreNav(event,this)"`:'readonly'}
+          style="${(!isScorer()||ff)?'cursor:default;opacity:.6':''}"
           data-rid="${ST.activeRound}" data-mi="${globalMi}" data-field="ga">
         <div class="vs-lbl">VS</div>
         <input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="2"
           class="sinp ${bW?'win-s':''}" value="${res.gb!==''?res.gb:''}" placeholder="–"
           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
-          ${isScorer()?`onfocus="scoreFocus(this)" oninput="scoreInput(this,${ST.activeRound},${globalMi},'gb')" onkeydown="scoreNav(event,this)"`:'readonly'}
-          style="${!isScorer()?'cursor:default;opacity:.6':''}"
+          ${(isScorer()&&!ff)?`onfocus="scoreFocus(this)" oninput="scoreInput(this,${ST.activeRound},${globalMi},'gb')" onkeydown="scoreNav(event,this)"`:'readonly'}
+          style="${(!isScorer()||ff)?'cursor:default;opacity:.6':''}"
           data-rid="${ST.activeRound}" data-mi="${globalMi}" data-field="gb">
         <div class="mt-r">
           <div class="mt-court">${h.label?h.label+' · ':''}TERRAIN ${localMi+1}</div>
@@ -1966,15 +2173,18 @@ function renderMatches(){
 // ══════════════════════════════════════════════════════════
 function computeStandings(){
   const stats={};
+  // Les équipes ABSENTES sont retirées du classement
   ST.teams.forEach(t=>{
+    if(isWd(t.id)) return;
     stats[t.id]={id:t.id,name:t.name,club:t.club,p1:t.p1,p2:t.p2,lv:t.lv,
-      pts:0,w:0,d:0,l:0,gf:0,ga:0,played:0,byeTours:0,h2h:{}};
+      pts:0,w:0,d:0,l:0,gf:0,ga:0,played:0,byeTours:0,ffTours:0,h2h:{}};
   });
 
   // Compensation bye (exemptions)
   ST.schedule.forEach((rd,r)=>{
     const roundHasScore=rd.halls.some((h,hi)=>
-      h.matches.some((_,mi)=>{
+      h.matches.some((m,mi)=>{
+        if(isFF(m)) return false; // un score saisi sur un forfait est ignoré
         const gmi=getGlobalMatchIdxFromHallIdx(r,hi,mi);
         const res=getRes(r,gmi); return res.ga!==''||res.gb!=='';
       })
@@ -1983,6 +2193,12 @@ function computeStandings(){
     rd.halls.forEach(h=>{
       (h.byes||[]).forEach(id=>{
         const s=stats[id]; if(s){ s.byeTours++;s.pts+=2;s.d++;s.played++; }
+      });
+      // Forfait : l'adversaire d'une équipe absente reçoit 2 points (match non joué)
+      h.matches.forEach(m=>{
+        const wa=isWd(m.tA), wb=isWd(m.tB);
+        if(wa===wb) return; // aucun absent, ou les deux absents
+        const s=stats[wa?m.tB:m.tA]; if(s){ s.ffTours++;s.pts+=2;s.d++;s.played++; }
       });
     });
   });
@@ -1996,7 +2212,7 @@ function computeStandings(){
         if(res.ga===''||res.gb==='') return;
         const ga=+res.ga, gb=+res.gb;
         const sA=stats[m.tA], sB=stats[m.tB];
-        if(!sA||!sB) return;
+        if(!sA||!sB) return; // match avec une équipe absente : ignoré (géré en forfait)
         sA.gf+=ga; sA.ga+=gb; sA.played++;
         sB.gf+=gb; sB.ga+=ga; sB.played++;
         if(ga>gb){ sA.pts+=3;sA.w++; sB.l++; }
@@ -2035,7 +2251,7 @@ function stblHTML(arr,limit){
   const rows=(limit?arr.slice(0,limit):arr).map((s,i)=>{
     const gd=s.gf-s.ga;
     return `<tr><td class="rank-c" style="color:${i<3?'var(--grn)':'var(--dim)'}">${med[i]||i+1}</td>
-      <td><span style="font-weight:700">${s.name}</span>${s.club&&s.club!=='—'?` <span class="t-club-badge">${s.club}</span>`:''}${s.byeTours>0?` <span class="sub-badge" title="${s.byeTours} exemption(s)">🟡×${s.byeTours}</span>`:''}
+      <td><span style="font-weight:700">${s.name}</span>${s.club&&s.club!=='—'?` <span class="t-club-badge">${s.club}</span>`:''}${s.byeTours>0?` <span class="sub-badge" title="${s.byeTours} exemption(s)">🟡×${s.byeTours}</span>`:''}${s.ffTours>0?` <span class="sub-badge" title="${s.ffTours} forfait(s) adverse(s) : 2 pts chacun">🚫×${s.ffTours}</span>`:''}
       <div style="font-size:11px;color:var(--muted)">${s.p1} · ${s.p2}</div></td>
       <td class="played-c">${s.played}</td><td class="wc">${s.w}</td><td class="dc">${s.d}</td><td class="lc">${s.l}</td>
       <td>${s.gf}</td><td>${s.ga}</td><td class="${gd>=0?'gdp':'gdn'}">${gd>0?'+':''}${gd}</td><td class="pts-c">${s.pts}</td></tr>`;
@@ -2411,11 +2627,11 @@ window.tvExit = function(){
 function tvMatchRowHTML(m, isLive){
   const aT = m.aId ? tObj(m.aId) : null;
   const bT = m.bId ? tObj(m.bId) : null;
-  const aName = aT ? aT.name : '<em>à déterminer</em>';
-  const bName = bT ? bT.name : '<em>à déterminer</em>';
+  const aName = aT ? aT.name + (isWd(aT.id)?' 🚫':'') : '<em>à déterminer</em>';
+  const bName = bT ? bT.name + (isWd(bT.id)?' 🚫':'') : '<em>à déterminer</em>';
   const aPlayers = aT ? `${aT.p1} · ${aT.p2}` : '';
   const bPlayers = bT ? `${bT.p1} · ${bT.p2}` : '';
-  const score = m.done ? `${m.r.ga} – ${m.r.gb}` : (isLive ? 'en cours' : '–');
+  const score = m.ff ? 'FORFAIT' : (m.done ? `${m.r.ga} – ${m.r.gb}` : (isLive ? 'en cours' : '–'));
   return `<div class="tv-match-row ${isLive?'tv-match-live':''}">
     <div class="tv-match-meta"><span>${m.label}</span><span class="tv-match-time">${m.time||''}</span></div>
     <div class="tv-match-teams">
@@ -2494,7 +2710,7 @@ function getTVScreens(){
       flat.push({
         label: (h.label?h.label+' · ':'')+'Terrain '+(localMi+1),
         time: rd.roundTime||'',
-        aId: m.tA, bId: m.tB, r: res, done:(res.ga!==''&&res.gb!=='')
+        aId: m.tA, bId: m.tB, r: res, ff: isFF(m), done:(isFF(m)||(res.ga!==''&&res.gb!==''))
       });
     });
     offset += h.matches.length;
@@ -2524,7 +2740,7 @@ function getTVScreens(){
         flatNext.push({
           label: (h.label?h.label+' · ':'')+'Terrain '+(localMi+1),
           time: rdNext.roundTime||'',
-          aId: m.tA, bId: m.tB, r:{ga:'',gb:''}, done:false
+          aId: m.tA, bId: m.tB, r:{ga:'',gb:''}, ff: isFF(m), done:false
         });
       });
     });
@@ -2659,6 +2875,7 @@ window.toggleAdminPanel = function(){
     window.loadUserList();
     window.loadClubList();
     window.loadPendingRegistrations();
+    syncRegForm();
   }
 };
 window.toggleNewUClubFields = function(){
@@ -2862,6 +3079,51 @@ window.loadClubList = function(){
     render();
   });
 };
+// ── Fenêtre d'inscription en ligne + équipes de réserve (stocké dans interclub/status → champ "reg") ──
+window.toggleRegReserveUI = function(){
+  const on = document.getElementById('reg_reserveOn');
+  const w  = document.getElementById('reg_reserveWrap');
+  if(on && w) w.style.display = on.checked ? '' : 'none';
+};
+function syncRegForm(){
+  const o=document.getElementById('reg_open'), c=document.getElementById('reg_close'),
+        on=document.getElementById('reg_reserveOn'), mx=document.getElementById('reg_reserveMax');
+  if(!o||!c||!on||!mx) return;
+  const ae = document.activeElement;
+  const r = ST.reg || {};
+  if(ae!==o) o.value = r.openAt || '';
+  if(ae!==c) c.value = r.closeAt || '';
+  if(ae!==on) on.checked = !!r.reserveOn;
+  if(ae!==mx) mx.value = r.reserveMax || 1;
+  toggleRegReserveUI();
+}
+window.saveRegSettings = async function(){
+  if(!isAdmin()) return;
+  const msg = document.getElementById('regSettingsMsg');
+  const say = (t,c)=>{ if(msg){ msg.textContent=t; msg.style.color=c; } };
+  const openAt  = document.getElementById('reg_open').value  || '';
+  const closeAt = document.getElementById('reg_close').value || '';
+  const reserveOn  = document.getElementById('reg_reserveOn').checked;
+  const reserveMax = Math.max(1, parseInt(document.getElementById('reg_reserveMax').value,10) || 1);
+  if(openAt && closeAt && new Date(closeAt) <= new Date(openAt)){ say('❌ La fin doit être après le début.','var(--red)'); return; }
+  if(reserveOn && !closeAt){ say('❌ Les réserves s\'ouvrent après la date de fin : renseignez-la.','var(--red)'); return; }
+  const reg = { openAt, closeAt, reserveOn, reserveMax,
+    openAtMs: openAt ? new Date(openAt).getTime() : 0,
+    closeAtMs: closeAt ? new Date(closeAt).getTime() : 0 };
+  let ok = true;
+  try { await setDoc(doc(db,'interclub','status'), { reg }, { merge:true }); }
+  catch(e){ console.error('save reg', e); ok = false; }
+  if(ok){ ST.reg = reg; say('✅ Enregistré.','var(--grn)'); setTimeout(()=>{ say('',''); },3000); }
+  else say('❌ Échec de l\'enregistrement.','var(--red)');
+};
+window.clearRegDates = async function(){
+  if(!isAdmin()) return;
+  document.getElementById('reg_open').value = '';
+  document.getElementById('reg_close').value = '';
+  document.getElementById('reg_reserveOn').checked = false;
+  toggleRegReserveUI();
+  await window.saveRegSettings();
+};
 window.updateClubQuota = async function(uid){
   const val = +document.getElementById(`clubMax_${uid}`).value || 0;
   try { await updateDoc(doc(db,'users',uid),{maxTeams:val}); loadClubList(); }
@@ -2895,7 +3157,7 @@ window.loadPendingRegistrations = function(force){
   unsubPendingRegs = onSnapshot(q, (snap)=>{
     REG_PENDING_IC = [];
     snap.forEach(d=> REG_PENDING_IC.push({id:d.id,...d.data()}));
-    REG_PENDING_IC.sort((a,b)=> (a.createdAtMs||0)-(b.createdAtMs||0));
+    REG_PENDING_IC.sort((a,b)=> (a.reserve?1:0)-(b.reserve?1:0) || (a.createdAtMs||0)-(b.createdAtMs||0));
     renderPendingRegistrationsIC();
   }, (e)=>{
     // L'écoute est terminée : on libère le verrou pour pouvoir se réabonner (et on réessaie seul)
@@ -2923,8 +3185,8 @@ function renderPendingRegistrationsIC(){
     return `
     <div style="border:1px solid var(--bdr);border-radius:10px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
       <div>
-        <div style="font-weight:700">${rank}${r.teamName||'—'} <span style="color:var(--muted);font-weight:400;font-size:12px">— ${r.clubName||'—'}</span></div>
-        <div style="color:var(--muted);font-size:13px">${r.p1||'—'} &amp; ${r.p2||'—'} · Niveau ${r.lv||3}</div>
+        <div style="font-weight:700">${rank}${r.reserve?'<span style="font-size:11px;font-weight:700;color:#4a86d8;border:1px solid #4a86d8;border-radius:8px;padding:1px 7px;margin-right:6px">🔄 RÉSERVE</span>':''}${r.teamName||'—'} <span style="color:var(--muted);font-weight:400;font-size:12px">— ${r.clubName||'—'}</span></div>
+        <div style="color:var(--muted);font-size:13px">${r.p1||'—'} &amp; ${r.p2||'—'} · Niveau ${normLv(r.lv)} · ${lvLabel(r.lv)}</div>
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-g btn-sm" onclick="approveRegistration('${r.id}')" ${free<=0?'disabled title="Quota d\'équipes atteint (voir Config)"':''}>✓ Valider</button>
@@ -2946,7 +3208,7 @@ window.approveAllPending = async function(){
   for(const r of toApprove){
     try {
       const teamId = 't_' + Date.now() + '_' + Math.random().toString(36).slice(2,6);
-      ST.teams.push({ id: teamId, name: r.teamName, club: r.clubName||'—', p1: r.p1, p2: r.p2, lv: r.lv||3 });
+      ST.teams.push({ id: teamId, name: r.teamName, club: r.clubName||'—', p1: r.p1, p2: r.p2, lv: normLv(r.lv) });
       await saveTournament({ teams: ST.teams });
       await updateDoc(doc(db,'interclub_registrations',r.id), { status:'imported', teamId });
       ok++;
@@ -2967,7 +3229,7 @@ window.approveRegistration = async function(id){
     if(!snap.exists()) return;
     const r = snap.data();
     const teamId = 't_' + Date.now() + '_' + Math.random().toString(36).slice(2,6);
-    ST.teams.push({ id: teamId, name: r.teamName, club: r.clubName||'—', p1: r.p1, p2: r.p2, lv: r.lv||3 });
+    ST.teams.push({ id: teamId, name: r.teamName, club: r.clubName||'—', p1: r.p1, p2: r.p2, lv: normLv(r.lv) });
     await saveTournament({ teams: ST.teams });
     await updateDoc(doc(db,'interclub_registrations',id), { status:'imported', teamId });
     renderTeams();
@@ -4455,6 +4717,24 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
             </div>
           </div>
         </div>
+        <div style="margin-top:16px;border:1px solid var(--bdr2);border-radius:10px;padding:14px">
+          <div class="admin-panel-ttl">📅 Inscriptions en ligne — période &amp; équipes de réserve</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+            <div><label>Début des inscriptions</label><input type="datetime-local" id="reg_open"></div>
+            <div><label>Fin des inscriptions</label><input type="datetime-local" id="reg_close"></div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;margin-top:12px">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0"><input type="checkbox" id="reg_reserveOn" onchange="toggleRegReserveUI()"> Autoriser des équipes de réserve (après la fin des inscriptions)</label>
+            <div id="reg_reserveWrap" style="display:none"><label>Nb de réserves par club</label><input type="number" id="reg_reserveMax" min="1" value="1" style="width:90px"></div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px">
+            <button class="btn btn-g btn-sm" onclick="saveRegSettings()">✓ Enregistrer</button>
+            <button class="btn btn-ghost btn-sm" onclick="clearRegDates()">Effacer les dates</button>
+            <span id="regSettingsMsg" style="font-size:13px;min-height:18px"></span>
+          </div>
+          <div style="font-size:12px;color:var(--muted);margin-top:8px;line-height:1.45">Sans dates, les inscriptions restent ouvertes en permanence. Les équipes de réserve ne peuvent être inscrites par les clubs qu'<strong>après</strong> la date de fin ; elles apparaissent en fin de liste d'attente (badge « RÉSERVE ») et vous les validez si une place se libère.</div>
+        </div>
+
         <div style="display:flex;align-items:center;gap:12px;margin:16px 0 12px">
           <div class="admin-panel-ttl" style="margin-bottom:0">Clubs enregistrés</div>
           <button onclick="loadClubList()" style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px">🔄 Rafraîchir</button>
@@ -4687,13 +4967,11 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
           <input type="text" id="t_p2" placeholder="Prénom Nom">
         </div>
         <div>
-          <label>Niveau (1–5)</label>
+          <label>Niveau</label>
           <select id="t_lv">
             <option value="1">⭐ 1 - Débutant</option>
-            <option value="2">⭐⭐ 2</option>
             <option value="3" selected>⭐⭐⭐ 3 - Intermédiaire</option>
-            <option value="4">⭐⭐⭐⭐ 4</option>
-            <option value="5">⭐⭐⭐⭐⭐ 5 - Expert</option>
+            <option value="5">⭐⭐⭐⭐⭐ 5 - Confirmé</option>
           </select>
         </div>
       </div>
@@ -4895,6 +5173,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
         <li><strong>Éviter les équipes du même club</strong> : autant que possible, deux équipes provenant du même club ne s'affrontent pas.</li>
         <li><strong>Minimiser les répétitions</strong> : deux équipes qui se sont déjà rencontrées ne rejouent pas ensemble si d'autres options existent.</li>
         <li><strong>Équilibre de niveau</strong> (si activé) : les équipes de niveau similaire sont prioritairement opposées.</li>
+        <li><strong>Équipe absente</strong> : si une équipe ne se présente pas, elle est retirée du classement et chacun de ses adversaires reçoit 2 points pour le match non joué.</li>
         <li>Si le nombre d'équipes est impair dans une salle, une équipe est exemptée (au repos) à chaque tour, à rotation équitable.</li>
       </ul>
     </div>
@@ -5127,7 +5406,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
         <div><label>Joueur 2</label><input type="text" id="edit_t_p2"></div>
       </div>
       <div><label>Niveau</label>
-        <select id="edit_t_lv"><option value="1">⭐</option><option value="2">⭐⭐</option><option value="3">⭐⭐⭐</option><option value="4">⭐⭐⭐⭐</option><option value="5">⭐⭐⭐⭐⭐</option></select>
+        <select id="edit_t_lv"><option value="1">⭐ 1 - Débutant</option><option value="3">⭐⭐⭐ 3 - Intermédiaire</option><option value="5">⭐⭐⭐⭐⭐ 5 - Confirmé</option></select>
       </div>
     </div>
     <div class="flex g8 fw" style="margin-top:14px">
@@ -5152,8 +5431,10 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
     <div style="color:var(--muted);font-size:13px">Chaque équipe inscrite est examinée par l'organisateur avant d'être intégrée au tournoi.</div>
   </div>
 
+  <div id="clubRegInfo" style="display:none;border-radius:12px;padding:12px 14px;margin-bottom:20px;font-size:13px;line-height:1.45"></div>
+
   <div id="clubAddForm" style="background:var(--s1);border:1px solid var(--bdr2);border-radius:12px;padding:16px;margin-bottom:20px">
-    <div class="admin-panel-ttl">➕ Inscrire une équipe</div>
+    <div class="admin-panel-ttl" id="clubAddTitle">➕ Inscrire une équipe</div>
     <div style="display:flex;flex-direction:column;gap:10px">
       <div><label>Nom de l'équipe</label><input type="text" id="club_t_name" placeholder="Ex : Les Aigles"></div>
       <div class="fr">
@@ -5161,7 +5442,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
         <div><label>Joueur 2</label><input type="text" id="club_t_p2"></div>
       </div>
       <div><label>Niveau</label>
-        <select id="club_t_lv"><option value="1">⭐</option><option value="2">⭐⭐</option><option value="3" selected>⭐⭐⭐</option><option value="4">⭐⭐⭐⭐</option><option value="5">⭐⭐⭐⭐⭐</option></select>
+        <select id="club_t_lv"><option value="1">⭐ 1 - Débutant</option><option value="3" selected>⭐⭐⭐ 3 - Intermédiaire</option><option value="5">⭐⭐⭐⭐⭐ 5 - Confirmé</option></select>
       </div>
       <button id="clubAddBtn" class="btn btn-g btn-sm" onclick="clubAddTeam()">✓ Inscrire cette équipe</button>
       <div id="clubAddMsg" style="font-size:13px;min-height:18px"></div>
