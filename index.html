@@ -118,16 +118,29 @@ function isLiveBlocked(){ return USER_ROLE === 'spectator' && !ST.liveOpen; }
 // ══════════════════════════════════════════════════════════
 // AUTH
 // ══════════════════════════════════════════════════════════
+// Lit le profil. Les règles Firestore acceptent le rôle dans `role` OU dans `roles` :
+// l'appli fait pareil (union des deux), sinon un compte club dont `roles` n'est pas à jour
+// serait pris pour un spectateur. En cas d'erreur de lecture : 2 essais, puis null
+// (on ne dégrade JAMAIS silencieusement un compte en « spectateur »).
 async function getUserProfile(uid){
-  try {
-    const snap = await getDoc(doc(db,'users',uid));
-    if(snap.exists()){
-      const d = snap.data();
-      const roles = Array.isArray(d.roles) && d.roles.length ? d.roles : [d.role || 'spectator'];
-      return { roles, name: d.name||'', clubName: d.clubName||'', maxTeams: d.maxTeams||0 };
+  for(let attempt=0; attempt<2; attempt++){
+    try {
+      const snap = await getDoc(doc(db,'users',uid));
+      if(snap.exists()){
+        const d = snap.data();
+        let roles = Array.isArray(d.roles) ? d.roles.slice() : [];
+        if(d.role && !roles.includes(d.role)) roles.push(d.role);
+        if(!roles.length) roles = ['spectator'];
+        if(roles.length > 1) roles = roles.filter(r=>r!=='spectator');
+        return { roles, name: d.name||'', clubName: d.clubName||'', maxTeams: d.maxTeams||0 };
+      }
+      return { roles:['spectator'], name:'', clubName:'', maxTeams:0 };
+    } catch(e){
+      console.warn('getUserProfile error:', e);
+      await new Promise(r=>setTimeout(r,700));
     }
-  } catch(e){ console.warn('getUserProfile error:', e); }
-  return { roles:['spectator'], name:'', clubName:'', maxTeams:0 };
+  }
+  return null;
 }
 async function ensureUserDoc(user){
   const ref  = doc(db,'users',user.uid);
@@ -147,8 +160,15 @@ onAuthStateChanged(auth, async (user)=>{
   if(USER_ROLE === 'spectator' && !user) return;
   if(user){
     CURRENT_USER = user;
-    await ensureUserDoc(user);
+    try { await ensureUserDoc(user); } catch(e){ console.warn('ensureUserDoc', e); }
     const profile = await getUserProfile(user.uid);
+    if(!profile){
+      await signOut(auth);
+      CURRENT_USER = null; USER_ROLE = null; USER_ROLES = [];
+      showLogin();
+      showAuthMsg('Impossible de charger votre profil. Réessayez dans un instant.', 'red');
+      return;
+    }
     USER_ROLES = profile.roles;
     CLUB_PROFILE = { clubName: profile.clubName || profile.name || 'Mon club', maxTeams: profile.maxTeams || 0 };
     const hasStaff = USER_ROLES.includes('admin') || USER_ROLES.includes('scorer');
@@ -488,6 +508,8 @@ function showApp(){
   document.getElementById('appScreen').style.display='block';
   const cs=document.getElementById('clubScreen'); if(cs) cs.style.display='none';
   applyRoleUI();
+  // Config / Équipes / Planning sont réservés à l'admin : les autres démarrent sur le Live
+  if(!isAdmin() && [1,2,3].includes(ST.page)) goTo(4);
 }
 function roleBadge(role){
   const map={admin:'👑 Admin',scorer:'✏️ Scorer',spectator:'👁 Spectateur',club:'🏟️ Club'};
@@ -585,6 +607,8 @@ function loadClubTeams(){
 function regPhase(){
   const r = CLUB_REG || {};
   const now = Date.now();
+  const f = r.finalCloseAt ? new Date(r.finalCloseAt).getTime() : 0;
+  if(f && now > f) return 'closed'; // clôture définitive : plus rien, réserves comprises
   const o = r.openAt  ? new Date(r.openAt).getTime()  : 0;
   const c = r.closeAt ? new Date(r.closeAt).getTime() : 0;
   if(o && now < o) return 'before';
@@ -627,10 +651,13 @@ function renderClubScreen(){
         : '';
       bg = 'rgba(30,140,69,.12)';
     } else if(phase==='reserve'){
-      html = `🔒 Les inscriptions sont closes depuis le <strong>${fmtRegDT(CLUB_REG.closeAt)}</strong>.<br>🔄 Vous pouvez inscrire jusqu'à <strong>${reserveMax}</strong> équipe${reserveMax>1?'s':''} <strong>de réserve</strong> : elle${reserveMax>1?'s':''} ne serai${reserveMax>1?'ent':'t'} validée${reserveMax>1?'s':''} par l'organisateur qu'en cas de désistement ou s'il reste des places libres.`;
+      html = `🔒 Les inscriptions sont closes depuis le <strong>${fmtRegDT(CLUB_REG.closeAt)}</strong>.<br>🔄 Vous pouvez inscrire jusqu'à <strong>${reserveMax}</strong> équipe${reserveMax>1?'s':''} <strong>de réserve</strong> : elle${reserveMax>1?'s':''} ne serai${reserveMax>1?'ent':'t'} validée${reserveMax>1?'s':''} par l'organisateur qu'en cas de désistement ou s'il reste des places libres.`
+        + (CLUB_REG.finalCloseAt ? `<br>⏱ Clôture définitive (réserves comprises) : <strong>${fmtRegDT(CLUB_REG.finalCloseAt)}</strong>.` : '');
       bg = 'rgba(80,140,220,.12)';
     } else {
-      html = `🔒 Les inscriptions en ligne sont closes depuis le <strong>${fmtRegDT(CLUB_REG.closeAt)}</strong>.`;
+      html = (CLUB_REG.finalCloseAt && Date.now() > new Date(CLUB_REG.finalCloseAt).getTime())
+        ? `🔒 Les inscriptions (réserves comprises) sont <strong>définitivement closes</strong> depuis le ${fmtRegDT(CLUB_REG.finalCloseAt)}.`
+        : `🔒 Les inscriptions en ligne sont closes depuis le <strong>${fmtRegDT(CLUB_REG.closeAt)}</strong>.`;
       bg = 'rgba(200,60,60,.10)';
     }
     info.style.display = html ? '' : 'none';
@@ -645,7 +672,15 @@ function renderClubScreen(){
   let showForm = false, fullTxt = '';
   if(phase==='open'){
     showForm = used < max;
-    if(!showForm) fullTxt = 'Quota d\'équipes atteint — contactez l\'organisateur pour l\'augmenter.';
+    if(!showForm){
+      fullTxt = 'Quota d\'équipes atteint.';
+      const rmax = Math.max(0, +(CLUB_REG && CLUB_REG.reserveMax) || 0);
+      if(CLUB_REG && CLUB_REG.reserveOn && rmax > 0){
+        fullTxt += ` ✅ Après la clôture des inscriptions${CLUB_REG.closeAt ? ' (le '+fmtRegDT(CLUB_REG.closeAt)+')' : ''}, vous pourrez inscrire ${rmax>1 ? 'jusqu\'à '+rmax+' équipes' : '1 équipe'} de réserve${CLUB_REG.finalCloseAt ? ', jusqu\'au '+fmtRegDT(CLUB_REG.finalCloseAt) : ''}.`;
+      } else {
+        fullTxt += ' Contactez l\'organisateur pour l\'augmenter.';
+      }
+    }
     if(titleEl) titleEl.textContent = '➕ Inscrire une équipe';
   } else if(phase==='reserve'){
     showForm = reserveTeams.length < reserveMax;
@@ -688,7 +723,7 @@ function renderClubScreen(){
     return `<div class="club-team-card" style="border:1px solid var(--bdr);border-radius:10px;padding:12px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
       <div>
         <div style="font-weight:700">${t.teamName||'—'}</div>
-        <div style="color:var(--muted);font-size:13px">${t.p1||'—'} &amp; ${t.p2||'—'} · Niveau ${normLv(t.lv)} · ${lvLabel(t.lv)}</div>
+        <div style="color:var(--muted);font-size:13px">${t.p1||'—'} &amp; ${t.p2||'—'} · Niveau ${lvNum(t.lv)} · ${lvLabel(t.lv)}</div>
         <div style="margin-top:4px">${badge}</div>
       </div>
       ${locked ? '' : `<div style="display:flex;gap:8px">
@@ -848,6 +883,9 @@ function updateStepVisibility(){
 
 // ── Navigation ─────────────────────────────────────────
 window.goTo = function(n){
+  // Pages 1 (Config), 2 (Équipes), 3 (Planning) : ADMIN uniquement. Un spectateur, un scorer
+  // ou un compte club n'y accède jamais (même avec le live ouvert) : on le renvoie au Live.
+  if(!isAdmin() && (n===1 || n===2 || n===3)) n = 4;
   closeAdminPanel(); // changement de page = le panneau admin se referme
   // Bloquer l'accès aux pages de contenu pour un spectateur si le live est fermé
   if(isLiveBlocked() && n!=='R' && n!=='T'){
@@ -1270,11 +1308,12 @@ function tName(id){ const t=tObj(id); return t?t.name:'?'; }
 function tClub(id){ const t=tObj(id); return t?t.club:''; }
 // ── Niveaux : 3 niveaux seulement (1 / 3 / 5) ──
 const LV_LABELS = {1:'Débutant', 3:'Intermédiaire', 5:'Confirmé'};
+function lvNum(v){ const n=normLv(v); return n===1?1:(n===3?2:3); } // affichage : 1, 2, 3
 function normLv(v){ v=+v||3; if(v<=1) return 1; if(v>=5) return 5; return 3; } // anciens niveaux 2 et 4 → 3
 function lvLabel(v){ return LV_LABELS[normLv(v)]; }
 function lvOptionsHTML(sel){
   const n = normLv(sel);
-  return [1,3,5].map(k=>`<option value="${k}" ${k===n?'selected':''}>${'⭐'.repeat(k)} ${k} - ${LV_LABELS[k]}</option>`).join('');
+  return [1,3,5].map(k=>`<option value="${k}" ${k===n?'selected':''}>${'⭐'.repeat(lvNum(k))} ${lvNum(k)} - ${LV_LABELS[k]}</option>`).join('');
 }
 // ── Équipes absentes (forfait) ──
 function isWd(id){ return Array.isArray(ST.withdrawn) && ST.withdrawn.includes(id); }
@@ -1750,7 +1789,7 @@ function renderTeams(){
       <span style="font-family:'Oswald',sans-serif;font-size:15px;color:var(--dim);min-width:26px">${i+1}</span>
       <div style="flex:1;min-width:0">
         <div style="font-weight:700;color:var(--ink)${isWd(t.id)?';text-decoration:line-through;opacity:.6':''}">${t.name} ${t.club&&t.club!=='—'?`<span class="t-club-badge">${t.club}</span>`:''}${isWd(t.id)?' <span style="font-size:11px;color:var(--red);text-decoration:none;display:inline-block">🚫 ABSENTE</span>':''}</div>
-        <div style="font-size:11px;color:var(--muted)">${t.p1} · ${t.p2} · ${'⭐'.repeat(normLv(t.lv))} ${lvLabel(t.lv)}</div>
+        <div style="font-size:11px;color:var(--muted)">${t.p1} · ${t.p2} · ${'⭐'.repeat(lvNum(t.lv))} ${lvLabel(t.lv)}</div>
       </div>
       ${isAdmin()?`${ST.schedule.length?`<button onclick="toggleWithdrawn('${t.id}')" title="${isWd(t.id)?'Réintégrer l\'équipe':'Marquer absente (forfait)'}" style="background:none;border:1px solid var(--ylw);color:var(--ylw);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px;margin-right:4px">${isWd(t.id)?'↩️':'🚫'}</button>`:''}<button onclick="openEditTeam('${t.id}')" style="background:none;border:1px solid var(--blu);color:var(--blu);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px;margin-right:4px">✏️</button><button onclick="removeTeam('${t.id}')" style="background:none;border:1px solid var(--red);color:var(--red);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px">✕</button>`:''}
     </div>`).join('');
@@ -2892,19 +2931,12 @@ window.adminCreateUser = async function(){
   const msg=document.getElementById('newUserMsg');
   if(!name||!email||!pwd){ msg.textContent='Tous les champs sont requis.'; msg.style.color='var(--red)'; return; }
   if(roles.length===0){ msg.textContent='Sélectionnez au moins un rôle.'; msg.style.color='var(--red)'; return; }
-  let clubName='', maxTeams=0;
-  if(roles.includes('club')){
-    clubName = document.getElementById('newU_club').value.trim();
-    maxTeams = +document.getElementById('newU_maxTeams').value || 0;
-    if(!clubName||maxTeams<1){ msg.textContent='Club et quota (≥1) requis pour un responsable club.'; msg.style.color='var(--red)'; return; }
-  }
   try {
     const res=await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=AIzaSyAvppGIS7M12LFgaPEuFdo-ed6rrAtgcSc`,
       {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password:pwd,returnSecureToken:true})});
     const data=await res.json();
     if(data.error) throw new Error(data.error.message);
     const userDoc = { email, name, role: primaryRole(roles), roles, createdAt:serverTimestamp(), createdBy:CURRENT_USER.uid };
-    if(roles.includes('club')){ userDoc.clubName = clubName; userDoc.maxTeams = maxTeams; }
     await setDoc(doc(db,'users',data.localId), userDoc);
     msg.textContent=`✅ Compte créé : ${name} (${roles.join(', ')})`; msg.style.color='var(--grn)';
     ['newU_name','newU_email','newU_pwd'].forEach(id=>document.getElementById(id).value='');
@@ -2929,10 +2961,7 @@ window.loadUserRolesIntoForm = async function(){
     const d = snap.data();
     const roles = Array.isArray(d.roles) && d.roles.length ? d.roles : [d.role || 'spectator'];
     document.querySelectorAll('.chgU_roleChk').forEach(c=> c.checked = roles.includes(c.value));
-    document.getElementById('chgU_club').value = d.clubName || '';
-    document.getElementById('chgU_maxTeams').value = d.maxTeams || 2;
-    toggleChgUClubFields();
-    msg.textContent = `✅ Rôles actuels chargés : ${roles.join(', ')}`; msg.style.color='var(--grn)';
+    msg.textContent = `✅ Rôles actuels chargés : ${roles.join(', ')}` + (roles.includes('club') ? ' (le rôle club se gère dans « Clubs »)' : ''); msg.style.color='var(--grn)';
   } catch(e){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; }
 };
 window.setUserRole = async function(){
@@ -2941,15 +2970,16 @@ window.setUserRole = async function(){
   const roles=Array.from(document.querySelectorAll('.chgU_roleChk:checked')).map(c=>c.value);
   const msg=document.getElementById('adminRoleMsg');
   if(!uid){ msg.textContent='UID requis.'; msg.style.color='var(--red)'; return; }
-  if(roles.length===0){ msg.textContent='Sélectionnez au moins un rôle.'; msg.style.color='var(--red)'; return; }
-  const update = { role: primaryRole(roles), roles };
-  if(roles.includes('club')){
-    const clubName = document.getElementById('chgU_club').value.trim();
-    const maxTeams = +document.getElementById('chgU_maxTeams').value || 0;
-    if(!clubName||maxTeams<1){ msg.textContent='Club et quota (≥1) requis pour un responsable club.'; msg.style.color='var(--red)'; return; }
-    update.clubName = clubName; update.maxTeams = maxTeams;
-  }
   try {
+    // Le rôle « club » existant est conservé tel quel (géré dans le dossier Clubs)
+    const cur = await getDoc(doc(db,'users',uid));
+    if(!cur.exists()){ msg.textContent='❌ Utilisateur introuvable.'; msg.style.color='var(--red)'; return; }
+    const cd = cur.data();
+    const curRoles = Array.isArray(cd.roles) ? cd.roles : [];
+    const hadClub = curRoles.includes('club') || cd.role === 'club';
+    if(roles.length===0 && !hadClub){ msg.textContent='Sélectionnez au moins un rôle.'; msg.style.color='var(--red)'; return; }
+    if(hadClub) roles.push('club');
+    const update = { role: primaryRole(roles), roles };
     await setDoc(doc(db,'users',uid), update, { merge:true });
     msg.textContent=`✅ Rôle(s) mis à jour.`; msg.style.color='var(--grn)';
     setTimeout(()=>{ msg.textContent=''; },3000);
@@ -2967,6 +2997,7 @@ window.loadUserList = function(){
       const u=d.data(); const uid=d.id;
       const roleIconMap={admin:'👑',scorer:'✏️',spectator:'👁',club:'🏟️'};
       const roles = Array.isArray(u.roles) && u.roles.length ? u.roles : [u.role||'spectator'];
+      if(roles.length===1 && roles[0]==='club') return; // compte club : voir dossier « Clubs »
       const rolesDisplay = roles.map(r=>`${roleIconMap[r]||'?'} ${r}`).join(' · ');
       const uidShort = uid.slice(0,6)+'…'+uid.slice(-4);
       const tr=document.createElement('tr');
@@ -2999,6 +3030,7 @@ window.copyUID = function(uid, btn){
 // ── Pré-remplit le formulaire "Modifier rôle" depuis la liste,
 //    sans avoir à copier/coller l'UID à la main ──────────────
 window.adminEditUserRole = async function(uid){
+  const staffBox = document.getElementById('admStaffBox'); if(staffBox) staffBox.open = true;
   const input = document.getElementById('adminUidInput');
   if(input) input.value = uid;
   await window.loadUserRolesIntoForm();
@@ -3093,6 +3125,8 @@ function syncRegForm(){
   const r = ST.reg || {};
   if(ae!==o) o.value = r.openAt || '';
   if(ae!==c) c.value = r.closeAt || '';
+  const fc = document.getElementById('reg_finalClose');
+  if(fc && ae!==fc) fc.value = r.finalCloseAt || '';
   if(ae!==on) on.checked = !!r.reserveOn;
   if(ae!==mx) mx.value = r.reserveMax || 1;
   toggleRegReserveUI();
@@ -3103,13 +3137,16 @@ window.saveRegSettings = async function(){
   const say = (t,c)=>{ if(msg){ msg.textContent=t; msg.style.color=c; } };
   const openAt  = document.getElementById('reg_open').value  || '';
   const closeAt = document.getElementById('reg_close').value || '';
+  const finalCloseAt = document.getElementById('reg_finalClose').value || '';
   const reserveOn  = document.getElementById('reg_reserveOn').checked;
   const reserveMax = Math.max(1, parseInt(document.getElementById('reg_reserveMax').value,10) || 1);
   if(openAt && closeAt && new Date(closeAt) <= new Date(openAt)){ say('❌ La fin doit être après le début.','var(--red)'); return; }
   if(reserveOn && !closeAt){ say('❌ Les réserves s\'ouvrent après la date de fin : renseignez-la.','var(--red)'); return; }
-  const reg = { openAt, closeAt, reserveOn, reserveMax,
+  if(finalCloseAt && closeAt && new Date(finalCloseAt) <= new Date(closeAt)){ say('❌ La clôture définitive doit être après la fin des inscriptions.','var(--red)'); return; }
+  const reg = { openAt, closeAt, finalCloseAt, reserveOn, reserveMax,
     openAtMs: openAt ? new Date(openAt).getTime() : 0,
-    closeAtMs: closeAt ? new Date(closeAt).getTime() : 0 };
+    closeAtMs: closeAt ? new Date(closeAt).getTime() : 0,
+    finalCloseAtMs: finalCloseAt ? new Date(finalCloseAt).getTime() : 0 };
   let ok = true;
   try { await setDoc(doc(db,'interclub','status'), { reg }, { merge:true }); }
   catch(e){ console.error('save reg', e); ok = false; }
@@ -3120,6 +3157,7 @@ window.clearRegDates = async function(){
   if(!isAdmin()) return;
   document.getElementById('reg_open').value = '';
   document.getElementById('reg_close').value = '';
+  document.getElementById('reg_finalClose').value = '';
   document.getElementById('reg_reserveOn').checked = false;
   toggleRegReserveUI();
   await window.saveRegSettings();
@@ -3186,7 +3224,7 @@ function renderPendingRegistrationsIC(){
     <div style="border:1px solid var(--bdr);border-radius:10px;padding:10px 12px;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
       <div>
         <div style="font-weight:700">${rank}${r.reserve?'<span style="font-size:11px;font-weight:700;color:#4a86d8;border:1px solid #4a86d8;border-radius:8px;padding:1px 7px;margin-right:6px">🔄 RÉSERVE</span>':''}${r.teamName||'—'} <span style="color:var(--muted);font-weight:400;font-size:12px">— ${r.clubName||'—'}</span></div>
-        <div style="color:var(--muted);font-size:13px">${r.p1||'—'} &amp; ${r.p2||'—'} · Niveau ${normLv(r.lv)} · ${lvLabel(r.lv)}</div>
+        <div style="color:var(--muted);font-size:13px">${r.p1||'—'} &amp; ${r.p2||'—'} · Niveau ${lvNum(r.lv)} · ${lvLabel(r.lv)}</div>
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-g btn-sm" onclick="approveRegistration('${r.id}')" ${free<=0?'disabled title="Quota d\'équipes atteint (voir Config)"':''}>✓ Valider</button>
@@ -3856,7 +3894,7 @@ window.printTeamSchedule = function(tid){
       <span><strong>${team.name}</strong>&nbsp;${team.club&&team.club!=='—'?`<span style="background:#e8f0ff;color:#1560c0;border-radius:4px;padding:1px 6px;font-size:10px;font-weight:700">${team.club}</span>`:''}</span>
       <span style="font-size:11px;color:#666">${rankStr}</span>
     </div>
-    <div class="fiche-joueurs">👤 ${team.p1} &nbsp;&amp;&nbsp; ${team.p2} &nbsp;·&nbsp; ${'⭐'.repeat(team.lv||1)}</div>
+    <div class="fiche-joueurs">👤 ${team.p1} &nbsp;&amp;&nbsp; ${team.p2} &nbsp;·&nbsp; ${'⭐'.repeat(lvNum(team.lv))}</div>
     <table>
       <thead><tr>
         <th>Vague</th><th>Heure</th><th>Session</th><th>Terrain</th><th>Adversaire</th><th>Score</th><th>Résultat</th>
@@ -4208,6 +4246,18 @@ html,body{ height:100%; background:var(--s0); color:var(--ink); font-family:'Exo
 /* ── ADMIN PANEL ─────────────────────────────────────── */
 .admin-panel{ background:var(--s1);color:var(--ink);padding:16px 20px;border-bottom:2px solid var(--bdr2);box-shadow:var(--shadow); }
 .admin-panel-ttl{ font-family:'Oswald',sans-serif;font-size:16px;letter-spacing:1px;color:var(--ylw);margin-bottom:12px; }
+.adm-box{ border:1px solid var(--bdr2);border-radius:12px;margin-bottom:14px;background:var(--s2); }
+.adm-box>summary{ cursor:pointer;padding:12px 14px;font-family:'Oswald',sans-serif;font-size:15px;letter-spacing:.8px;color:var(--ylw);list-style:none;user-select:none; }
+.adm-box>summary::-webkit-details-marker{ display:none; }
+.adm-box>summary::before{ content:'▸  '; }
+.adm-box[open]>summary::before{ content:'▾  '; }
+.adm-box>.adm-body{ padding:4px 14px 14px; }
+.adm-sub{ border:1px solid var(--bdr);border-radius:10px;margin:12px 0;background:var(--s1); }
+.adm-sub>summary{ cursor:pointer;padding:9px 12px;font-weight:700;font-size:13px;color:var(--ink);list-style:none;user-select:none; }
+.adm-sub>summary::-webkit-details-marker{ display:none; }
+.adm-sub>summary::before{ content:'▸  '; }
+.adm-sub[open]>summary::before{ content:'▾  '; }
+.adm-sub>.adm-body{ padding:2px 12px 12px; }
 
 /* ── SPECTATOR NAV ───────────────────────────────────── */
 .spec-nav{ display:none;background:var(--s1);border-bottom:3px solid var(--bdr2);padding:0 8px;overflow-x:auto;white-space:nowrap; }
@@ -4638,9 +4688,13 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
 <!-- PANNEAU ADMIN -->
 <div id="adminPanel" style="display:none">
   <div class="admin-panel">
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px;max-width:960px">
+    <div style="max-width:960px">
+    <details class="adm-box" id="admStaffBox">
+      <summary>👔 COMPTES STAFF — admin / scorer / spectateur (créer, rôles, utilisateurs)</summary>
+      <div class="adm-body">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px">
       <div>
-        <div class="admin-panel-ttl">➕ Créer un compte</div>
+        <div class="admin-panel-ttl">➕ Créer un compte staff</div>
         <div style="display:flex;flex-direction:column;gap:10px">
           <div><label>Prénom / Nom</label><input type="text" id="newU_name" placeholder="Marie Dupont"></div>
           <div><label>Email</label><input type="email" id="newU_email" placeholder="marie@exemple.com"></div>
@@ -4650,14 +4704,10 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
             <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:4px">
               <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="newU_roleChk" value="scorer" onchange="toggleNewUClubFields()"> ✏️ Scorer</label>
               <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="newU_roleChk" value="spectator" onchange="toggleNewUClubFields()"> 👁 Spectateur</label>
-              <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="newU_roleChk" value="club" onchange="toggleNewUClubFields()"> 🏟️ Responsable club</label>
               <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="newU_roleChk" value="admin" onchange="toggleNewUClubFields()"> 👑 Admin</label>
             </div>
           </div>
-          <div id="newU_clubFields" style="display:none;gap:10px;flex-direction:column;background:var(--s1);border-radius:8px;padding:10px">
-            <div><label>Nom du club</label><input type="text" id="newU_club" placeholder="Pickleball Club de..."></div>
-            <div><label>Quota d'équipes autorisées</label><input type="number" id="newU_maxTeams" min="1" value="2"></div>
-          </div>
+          <div style="font-size:11px;color:var(--muted);line-height:1.5">🏟️ Les comptes de <strong>responsables de club</strong> se créent uniquement dans le dossier « Clubs » ci-dessous.</div>
           <div style="display:flex;justify-content:flex-end">
             <button class="btn btn-g btn-sm" onclick="adminCreateUser()">✓ Créer</button>
           </div>
@@ -4665,7 +4715,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
         </div>
       </div>
       <div>
-        <div class="admin-panel-ttl">🔑 Modifier le(s) rôle(s)</div>
+        <div class="admin-panel-ttl">🔑 Modifier le(s) rôle(s) staff</div>
         <div style="display:flex;flex-direction:column;gap:10px">
           <div style="display:flex;gap:10px;align-items:flex-end">
             <div style="flex:1"><label>UID utilisateur</label><input type="text" id="adminUidInput" placeholder="Firebase UID"></div>
@@ -4677,18 +4727,13 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
               <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="chgU_roleChk" value="admin"> 👑 Admin</label>
               <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="chgU_roleChk" value="scorer"> ✏️ Scorer</label>
               <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="chgU_roleChk" value="spectator"> 👁 Spectateur</label>
-              <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="chgU_roleChk" value="club" onchange="toggleChgUClubFields()"> 🏟️ Responsable club</label>
             </div>
-          </div>
-          <div id="chgU_clubFields" style="display:none;gap:10px;flex-direction:column;background:var(--s1);border-radius:8px;padding:10px">
-            <div><label>Nom du club</label><input type="text" id="chgU_club" placeholder="Pickleball Club de..."></div>
-            <div><label>Quota d'équipes autorisées</label><input type="number" id="chgU_maxTeams" min="1" value="2"></div>
           </div>
           <div style="display:flex;justify-content:flex-end">
             <button class="btn btn-y btn-sm" onclick="setUserRole()">Appliquer</button>
           </div>
           <div id="adminRoleMsg" style="font-size:13px;min-height:18px"></div>
-          <div style="font-size:11px;color:var(--muted);line-height:1.6">💡 Un même compte peut cumuler plusieurs rôles (ex : Scorer + Responsable club) : l'accès combiné se fait automatiquement à la connexion.</div>
+          <div style="font-size:11px;color:var(--muted);line-height:1.6">💡 Le rôle « club » d'un compte n'est jamais modifié ici : il se gère dans le dossier « Clubs ».</div>
         </div>
       </div>
       <div style="grid-column:1/-1;margin-top:16px;border-top:1px solid var(--bdr);padding-top:16px">
@@ -4699,12 +4744,19 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
         <div style="overflow-x:auto"><table class="user-tbl" style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid var(--bdr2)"><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Nom</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Email</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">UID</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Rôle</th><th style="padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Action</th></tr></thead><tbody id="userListBody"><tr><td colspan="5" style="color:var(--muted);font-size:13px;padding:10px 0">Chargement…</td></tr></tbody></table></div>
       </div>
 
+      </div>
+      </div>
+    </details>
+
       <!-- 🏟️ GESTION DES CLUBS -->
-      <div style="grid-column:1/-1;margin-top:16px;border-top:1px solid var(--bdr);padding-top:16px">
-        <div class="admin-panel-ttl">🏟️ Gestion des clubs</div>
+    <details class="adm-box" id="admClubsBox">
+      <summary>🏟️ CLUBS — comptes clubs, inscriptions en ligne, validation</summary>
+      <div class="adm-body">
+        <details class="adm-sub">
+          <summary>➕ Créer un compte club (accès inscription d'équipes)</summary>
+          <div class="adm-body">
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px">
           <div>
-            <div style="font-size:13px;color:var(--muted);margin-bottom:8px">Créer un compte club (accès inscription d'équipes)</div>
             <div style="display:flex;flex-direction:column;gap:10px">
               <div><label>Nom du club</label><input type="text" id="newC_name" placeholder="Ex : RSTH Pickleball"></div>
               <div><label>Email</label><input type="email" id="newC_email" placeholder="club@exemple.com"></div>
@@ -4717,11 +4769,16 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
             </div>
           </div>
         </div>
-        <div style="margin-top:16px;border:1px solid var(--bdr2);border-radius:10px;padding:14px">
-          <div class="admin-panel-ttl">📅 Inscriptions en ligne — période &amp; équipes de réserve</div>
+          </div>
+        </details>
+        <details class="adm-sub">
+          <summary>📅 Période d'inscription en ligne &amp; équipes de réserve</summary>
+          <div class="adm-body">
+        <div>
           <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
             <div><label>Début des inscriptions</label><input type="datetime-local" id="reg_open"></div>
             <div><label>Fin des inscriptions</label><input type="datetime-local" id="reg_close"></div>
+            <div><label>Clôture définitive (réserves comprises)</label><input type="datetime-local" id="reg_finalClose"></div>
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;margin-top:12px">
             <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0"><input type="checkbox" id="reg_reserveOn" onchange="toggleRegReserveUI()"> Autoriser des équipes de réserve (après la fin des inscriptions)</label>
@@ -4732,8 +4789,11 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
             <button class="btn btn-ghost btn-sm" onclick="clearRegDates()">Effacer les dates</button>
             <span id="regSettingsMsg" style="font-size:13px;min-height:18px"></span>
           </div>
-          <div style="font-size:12px;color:var(--muted);margin-top:8px;line-height:1.45">Sans dates, les inscriptions restent ouvertes en permanence. Les équipes de réserve ne peuvent être inscrites par les clubs qu'<strong>après</strong> la date de fin ; elles apparaissent en fin de liste d'attente (badge « RÉSERVE ») et vous les validez si une place se libère.</div>
+          <div style="font-size:12px;color:var(--muted);margin-top:8px;line-height:1.45">Sans dates, les inscriptions restent ouvertes en permanence. La <strong>clôture définitive</strong> ferme tout (réserves comprises). Les équipes de réserve ne peuvent être inscrites par les clubs qu'<strong>après</strong> la date de fin ; elles apparaissent en fin de liste d'attente (badge « RÉSERVE ») et vous les validez si une place se libère.</div>
         </div>
+
+          </div>
+        </details>
 
         <div style="display:flex;align-items:center;gap:12px;margin:16px 0 12px">
           <div class="admin-panel-ttl" style="margin-bottom:0">Clubs enregistrés</div>
@@ -4749,6 +4809,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
         <div id="pendingRegCap" style="font-size:12px;color:var(--muted);margin-bottom:8px"></div>
         <div id="pendingRegList" style="color:var(--muted);font-size:13px">Chargement…</div>
       </div>
+    </details>
 
       <!-- Live control + outils admin -->
       <div style="grid-column:1/-1;border-top:1px solid var(--bdr);padding-top:16px;display:flex;flex-wrap:wrap;gap:10px;align-items:center">
@@ -4970,8 +5031,8 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
           <label>Niveau</label>
           <select id="t_lv">
             <option value="1">⭐ 1 - Débutant</option>
-            <option value="3" selected>⭐⭐⭐ 3 - Intermédiaire</option>
-            <option value="5">⭐⭐⭐⭐⭐ 5 - Confirmé</option>
+            <option value="3" selected>⭐⭐ 2 - Intermédiaire</option>
+            <option value="5">⭐⭐⭐ 3 - Confirmé</option>
           </select>
         </div>
       </div>
@@ -5406,7 +5467,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
         <div><label>Joueur 2</label><input type="text" id="edit_t_p2"></div>
       </div>
       <div><label>Niveau</label>
-        <select id="edit_t_lv"><option value="1">⭐ 1 - Débutant</option><option value="3">⭐⭐⭐ 3 - Intermédiaire</option><option value="5">⭐⭐⭐⭐⭐ 5 - Confirmé</option></select>
+        <select id="edit_t_lv"><option value="1">⭐ 1 - Débutant</option><option value="3">⭐⭐ 2 - Intermédiaire</option><option value="5">⭐⭐⭐ 3 - Confirmé</option></select>
       </div>
     </div>
     <div class="flex g8 fw" style="margin-top:14px">
@@ -5442,7 +5503,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
         <div><label>Joueur 2</label><input type="text" id="club_t_p2"></div>
       </div>
       <div><label>Niveau</label>
-        <select id="club_t_lv"><option value="1">⭐ 1 - Débutant</option><option value="3" selected>⭐⭐⭐ 3 - Intermédiaire</option><option value="5">⭐⭐⭐⭐⭐ 5 - Confirmé</option></select>
+        <select id="club_t_lv"><option value="1">⭐ 1 - Débutant</option><option value="3" selected>⭐⭐ 2 - Intermédiaire</option><option value="5">⭐⭐⭐ 3 - Confirmé</option></select>
       </div>
       <button id="clubAddBtn" class="btn btn-g btn-sm" onclick="clubAddTeam()">✓ Inscrire cette équipe</button>
       <div id="clubAddMsg" style="font-size:13px;min-height:18px"></div>
