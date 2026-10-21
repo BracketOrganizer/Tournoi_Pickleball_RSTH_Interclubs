@@ -187,6 +187,7 @@ onAuthStateChanged(auth, async (user)=>{
       subscribeToMessages();
       toggleClubExtraNav(hasClub);
       if(isManager()) loadPendingRegistrations(); // inscriptions en attente : temps réel dès la connexion
+      if(hasClub) showAccessChoice();               // double rôle : où souhaitez-vous aller ?
       return;
     }
     if(hasClub){
@@ -558,6 +559,7 @@ let CLUB_EDIT_ID = null;   // id de l'inscription en cours d'édition (ou null)
 let CLUB_REG     = {};     // réglages d'inscription : {openAt, closeAt, reserveOn, reserveMax}
 
 window.toggleClubExtraNav = function(show){
+  if(!show){ const ov=document.getElementById('accessChoiceOverlay'); if(ov) ov.remove(); }
   const b1 = document.getElementById('clubExtraBtn');
   const b2 = document.getElementById('drawerClubExtraBtn');
   if(b1) b1.style.display = show ? '' : 'none';
@@ -864,6 +866,8 @@ function applyRoleUI(){
   if(specNav) specNav.classList.toggle('visible', isSpec);
   const stepNav = document.getElementById('stepNav');
   if(stepNav) stepNav.style.display = isSpec ? 'none' : '';
+  const linkSubEl = document.getElementById('admLinkSub');
+  if(linkSubEl) linkSubEl.style.display = isAdmin() ? '' : 'none';
   const staffBoxEl = document.getElementById('admStaffBox');
   if(staffBoxEl){ staffBoxEl.style.display = isAdmin() ? '' : 'none'; if(!isAdmin()) staffBoxEl.open = false; }
   document.querySelectorAll('[data-role="admin"]').forEach(el=>{
@@ -3079,7 +3083,7 @@ window.adminCreateClub = async function(){
     document.getElementById('newC_max').value='1';
     setTimeout(()=>{ msg.textContent=''; },5000);
     loadClubList();
-  } catch(e){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; }
+  } catch(e){ msg.textContent='❌ '+authErrText(e); msg.style.color='var(--red)'; }
 };
 window.loadClubList = function(){
   if(!isManager()) return;
@@ -3169,6 +3173,29 @@ window.clearRegDates = async function(){
   toggleRegReserveUI();
   await window.saveRegSettings();
 };
+// ── Ajouter le rôle « club » à un compte EXISTANT (ex : scorer/admin qui est aussi responsable de club) ──
+window.adminLinkClubRole = async function(){
+  const msg = document.getElementById('linkClubMsg');
+  const say = (t,c)=>{ if(msg){ msg.textContent=t; msg.style.color=c; } };
+  if(!isAdmin()){ say('Seul un admin peut ajouter un rôle à un compte existant.','var(--red)'); return; }
+  const email = document.getElementById('linkC_email').value.trim();
+  const clubName = document.getElementById('linkC_name').value.trim();
+  const maxTeams = +document.getElementById('linkC_max').value || 0;
+  if(!email||!clubName||maxTeams<1){ say('Email, nom du club et quota (≥1) sont requis.','var(--red)'); return; }
+  try {
+    let snap = await getDocs(query(collection(db,'users'), where('email','==',email)));
+    if(snap.empty && email !== email.toLowerCase()) snap = await getDocs(query(collection(db,'users'), where('email','==',email.toLowerCase())));
+    if(snap.empty){ say('❌ Aucun compte avec cet email. Créez-le d\'abord dans « Créer un compte club ».','var(--red)'); return; }
+    const d = snap.docs[0], data = d.data();
+    let roles = Array.isArray(data.roles) ? data.roles.slice() : [];
+    if(data.role && !roles.includes(data.role)) roles.push(data.role);
+    roles = roles.filter(r=>r!=='spectator');
+    if(!roles.includes('club')) roles.push('club');
+    await updateDoc(d.ref, { roles, role: primaryRole(roles), clubName, maxTeams });
+    say(`✅ ${email} est maintenant responsable du club « ${clubName} » (${maxTeams} équipe${maxTeams>1?'s':''} max) en plus de ses autres rôles.`,'var(--grn)');
+    ['linkC_email','linkC_name'].forEach(id=>document.getElementById(id).value='');
+  } catch(e){ say('❌ '+e.message,'var(--red)'); }
+};
 window.updateClubQuota = async function(uid){
   const val = +document.getElementById(`clubMax_${uid}`).value || 0;
   try { await updateDoc(doc(db,'users',uid),{maxTeams:val}); loadClubList(); }
@@ -3212,6 +3239,44 @@ window.loadPendingRegistrations = function(force){
     setTimeout(()=>{ if(isManager() && !unsubPendingRegs) loadPendingRegistrations(); }, 5000);
   });
 };
+// Regroupe une liste d'inscriptions en attente PAR CLUB (même si les inscriptions d'un club
+// ont été faites à des moments différents). L'ordre de priorité global (#n) reste celui de la liste.
+function groupByClubHTML(list, clubOf, cardFn){
+  const groups = new Map();
+  list.forEach((r,i)=>{
+    const name = String(clubOf(r) || '').trim() || '— Sans club —';
+    const key = name.toLowerCase();
+    if(!groups.has(key)) groups.set(key, { name, items:[] });
+    groups.get(key).items.push({ r, i });
+  });
+  return [...groups.values()].sort((a,b)=>a.name.localeCompare(b.name,'fr')).map(g=>{
+    const nRes = g.items.filter(x=>x.r.reserve).length;
+    return `<div style="margin-bottom:14px"><div style="font-weight:700;font-size:13px;color:var(--ink);padding:6px 4px;border-bottom:2px solid var(--bdr2);margin-bottom:8px">🏟️ ${g.name} <span style="font-weight:400;color:var(--muted);font-size:12px">— ${g.items.length} en attente${nRes?` (dont ${nRes} réserve)`:''}</span></div>${g.items.map(x=>cardFn(x.r,x.i)).join('')}</div>`;
+  }).join('');
+}
+function authErrText(e){
+  return /EMAIL_EXISTS/.test(String(e && e.message))
+    ? "Cet email a déjà un compte (ex : scorer / admin). Un admin peut lui ajouter le rôle avec « 🔗 Ajouter le rôle … à un compte existant »."
+    : (e && e.message);
+}
+// Compte à double rôle (staff + club/responsable) : on demande où aller à la connexion
+function showAccessChoice(){
+  const old = document.getElementById('accessChoiceOverlay'); if(old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'accessChoiceOverlay';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:900;background:rgba(0,0,0,.65);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:16px';
+  ov.innerHTML = `<div style="background:var(--s1,#fff);color:var(--ink,#222);border-radius:14px;padding:22px;max-width:400px;width:100%;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,.4)">
+    <div style="font-size:18px;font-weight:800;margin-bottom:6px">Où souhaitez-vous aller ?</div>
+    <div style="font-size:13px;opacity:.7;margin-bottom:16px">Votre compte a plusieurs accès.</div>
+    <button class="btn btn-g" style="width:100%;margin-bottom:10px" onclick="chooseAccess('club')">🏟️ Inscrire mes équipes (mon club)</button>
+    <button class="btn btn-ghost" style="width:100%" onclick="chooseAccess('app')">🏆 Gestion / scores du tournoi</button>
+  </div>`;
+  document.body.appendChild(ov);
+}
+window.chooseAccess = function(k){
+  const ov = document.getElementById('accessChoiceOverlay'); if(ov) ov.remove();
+  if(k==='club') openClubFromApp();
+};
 function renderPendingRegistrationsIC(){
   const listEl=document.getElementById('pendingRegList'); if(!listEl) return;
   const max = (ST.cfg && ST.cfg.n) ? ST.cfg.n : 0;
@@ -3225,7 +3290,7 @@ function renderPendingRegistrationsIC(){
   const bulkBtn = document.getElementById('regValidateAllBtn');
   if(bulkBtn) bulkBtn.style.display = REG_PENDING_IC.length ? '' : 'none';
   if(REG_PENDING_IC.length===0){ listEl.innerHTML='<div style="color:var(--muted);padding:10px 0;font-size:13px">Aucune inscription en attente.</div>'; return; }
-  listEl.innerHTML = REG_PENDING_IC.map((r,i)=>{
+  const cardIC = (r,i)=>{
     const willFit = i < free;
     const rank = `<span style="font-size:11px;font-weight:700;color:${willFit?'#5ad080':'#e6a23c'};background:rgba(255,255,255,.06);border-radius:8px;padding:1px 7px;margin-right:6px">#${i+1}${willFit?'':' · attente'}</span>`;
     return `
@@ -3239,7 +3304,9 @@ function renderPendingRegistrationsIC(){
         <button class="btn btn-ghost btn-sm" style="border-color:var(--red);color:var(--red)" onclick="rejectRegistration('${r.id}')">✕ Refuser</button>
       </div>
     </div>`;
-  }).join('');
+  };
+  // Équipes rangées par club (l'ordre de priorité #n reste global)
+  listEl.innerHTML = groupByClubHTML(REG_PENDING_IC, r=>r.clubName, cardIC);
 }
 window.approveAllPending = async function(){
   if(!isManager()) return;
@@ -4779,6 +4846,19 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
             </div>
           </div>
         </div>
+          </div>
+        </details>
+        <details class="adm-sub" id="admLinkSub">
+          <summary>🔗 Ajouter le rôle club à un compte existant (scorer / admin déjà inscrit)</summary>
+          <div class="adm-body">
+            <div style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5">Pour un responsable de club dont l'email est déjà utilisé (rôles staff) : il garde ses accès actuels et reçoit en plus l'espace d'inscription des équipes. À sa connexion, l'appli lui demande où aller. <em>(Admin uniquement)</em></div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+              <div><label>Email du compte existant</label><input type="email" id="linkC_email" placeholder="email@exemple.com"></div>
+              <div><label>Nom du club</label><input type="text" id="linkC_name" placeholder="Pickleball Club de..."></div>
+              <div><label>Quota d'équipes</label><input type="number" id="linkC_max" min="1" value="2"></div>
+            </div>
+            <div style="display:flex;justify-content:flex-end;margin-top:10px"><button class="btn btn-g btn-sm" onclick="adminLinkClubRole()">✓ Ajouter le rôle club</button></div>
+            <div id="linkClubMsg" style="font-size:13px;min-height:18px"></div>
           </div>
         </details>
         <details class="adm-sub">
