@@ -109,9 +109,13 @@ const ST = {
 };
 
 // ─── Helpers rôle ───────────────────────────────────────
-function primaryRole(roles){ for(const r of ['admin','scorer','club','spectator']) if(roles.includes(r)) return r; return roles[0]||'spectator'; }
-function isAdmin()  { return USER_ROLES.includes('admin'); }
-function isScorer() { return USER_ROLES.includes('admin') || USER_ROLES.includes('scorer'); }
+function primaryRole(roles){ for(const r of ['admin','users','scorer','club','spectator']) if(roles.includes(r)) return r; return roles[0]||'spectator'; }
+// ADMIN strict : seul à gérer les comptes staff (créer, rôles, liste des utilisateurs).
+function isAdmin()   { return USER_ROLES.includes('admin'); }
+// GESTIONNAIRE : admin OU rôle « users » = accès à tous les réglages de l'appli
+// (config, équipes, planning, tournoi, clubs, inscriptions, live…) SAUF les comptes staff.
+function isManager() { return USER_ROLES.includes('admin') || USER_ROLES.includes('users'); }
+function isScorer()  { return isManager() || USER_ROLES.includes('scorer'); }
 function isClub()   { return USER_ROLES.includes('club'); }
 function isLiveBlocked(){ return USER_ROLE === 'spectator' && !ST.liveOpen; }
 
@@ -171,18 +175,18 @@ onAuthStateChanged(auth, async (user)=>{
     }
     USER_ROLES = profile.roles;
     CLUB_PROFILE = { clubName: profile.clubName || profile.name || 'Mon club', maxTeams: profile.maxTeams || 0 };
-    const hasStaff = USER_ROLES.includes('admin') || USER_ROLES.includes('scorer');
+    const hasStaff = USER_ROLES.includes('admin') || USER_ROLES.includes('users') || USER_ROLES.includes('scorer');
     const hasClub  = USER_ROLES.includes('club');
     // Accès combiné automatique : le staff (admin/scorer) passe toujours par l'appli principale,
     // avec en plus un accès direct à son espace club s'il a aussi le rôle "club".
     if(hasStaff){
-      USER_ROLE = USER_ROLES.includes('admin') ? 'admin' : 'scorer';
+      USER_ROLE = USER_ROLES.includes('admin') ? 'admin' : (USER_ROLES.includes('users') ? 'users' : 'scorer');
       showApp();
       subscribeToTournament();
       subscribeToResults();
       subscribeToMessages();
       toggleClubExtraNav(hasClub);
-      if(USER_ROLES.includes('admin')) loadPendingRegistrations(); // inscriptions en attente : temps réel dès la connexion
+      if(isManager()) loadPendingRegistrations(); // inscriptions en attente : temps réel dès la connexion
       return;
     }
     if(hasClub){
@@ -509,10 +513,10 @@ function showApp(){
   const cs=document.getElementById('clubScreen'); if(cs) cs.style.display='none';
   applyRoleUI();
   // Config / Équipes / Planning sont réservés à l'admin : les autres démarrent sur le Live
-  if(!isAdmin() && [1,2,3].includes(ST.page)) goTo(4);
+  if(!isManager() && [1,2,3].includes(ST.page)) goTo(4);
 }
 function roleBadge(role){
-  const map={admin:'👑 Admin',scorer:'✏️ Scorer',spectator:'👁 Spectateur',club:'🏟️ Club'};
+  const map={admin:'👑 Admin',users:'🛠 Users',scorer:'✏️ Scorer',spectator:'👁 Spectateur',club:'🏟️ Club'};
   return map[role]||role;
 }
 function authErrMsg(code){
@@ -568,7 +572,7 @@ async function showClubScreen(){
   if(!CLUB_PROFILE) CLUB_PROFILE = { clubName: 'Mon club', maxTeams: 0 };
   const nameEl = document.getElementById('clubHdrName');
   if(nameEl) nameEl.textContent = '🏟️ ' + CLUB_PROFILE.clubName;
-  const hasStaff = USER_ROLES.includes('admin') || USER_ROLES.includes('scorer');
+  const hasStaff = USER_ROLES.includes('admin') || USER_ROLES.includes('users') || USER_ROLES.includes('scorer');
   const backBtn = document.getElementById('clubBackToAppBtn');
   const logoutBtn = document.getElementById('clubLogoutBtn');
   if(backBtn)   backBtn.style.display   = hasStaff ? '' : 'none';
@@ -848,7 +852,7 @@ function showAuthMsg(msg,color){
   el.style.color=color==='red'?'var(--red)':'var(--grn)';
 }
 function applyRoleUI(){
-  if(!isAdmin()) closeAdminPanel(); // le panneau admin ne reste jamais ouvert pour un non-admin
+  if(!isManager()) closeAdminPanel(); // le panneau admin ne reste jamais ouvert pour un non-admin
   const name = CURRENT_USER
     ? (CURRENT_USER.displayName||CURRENT_USER.email||'?')
     : '📺 Mode Live';
@@ -860,8 +864,10 @@ function applyRoleUI(){
   if(specNav) specNav.classList.toggle('visible', isSpec);
   const stepNav = document.getElementById('stepNav');
   if(stepNav) stepNav.style.display = isSpec ? 'none' : '';
+  const staffBoxEl = document.getElementById('admStaffBox');
+  if(staffBoxEl){ staffBoxEl.style.display = isAdmin() ? '' : 'none'; if(!isAdmin()) staffBoxEl.open = false; }
   document.querySelectorAll('[data-role="admin"]').forEach(el=>{
-    el.style.display = isAdmin() ? '' : 'none';
+    el.style.display = isManager() ? '' : 'none';
   });
   document.querySelectorAll('[data-role="scorer"]').forEach(el=>{
     el.style.display = isScorer() ? '' : 'none';
@@ -877,7 +883,7 @@ function applyRoleUI(){
 function updateStepVisibility(){
   [1,2,3].forEach(n=>{
     const el=document.querySelector(`.step[data-s="${n}"]`);
-    if(el) el.style.display = isAdmin() ? '' : 'none';
+    if(el) el.style.display = isManager() ? '' : 'none';
   });
 }
 
@@ -885,7 +891,7 @@ function updateStepVisibility(){
 window.goTo = function(n){
   // Pages 1 (Config), 2 (Équipes), 3 (Planning) : ADMIN uniquement. Un spectateur, un scorer
   // ou un compte club n'y accède jamais (même avec le live ouvert) : on le renvoie au Live.
-  if(!isAdmin() && (n===1 || n===2 || n===3)) n = 4;
+  if(!isManager() && (n===1 || n===2 || n===3)) n = 4;
   closeAdminPanel(); // changement de page = le panneau admin se referme
   // Bloquer l'accès aux pages de contenu pour un spectateur si le live est fermé
   if(isLiveBlocked() && n!=='R' && n!=='T'){
@@ -919,7 +925,7 @@ window.goTo = function(n){
     return;
   }
   document.getElementById('page'+n).classList.add('active');
-  document.getElementById('backBtn').style.display=(n>1&&isAdmin())?'':'none';
+  document.getElementById('backBtn').style.display=(n>1&&isManager())?'':'none';
   updateFwdBtn();
   updateSteps(n);
   updateSpectatorNav(n);
@@ -934,7 +940,7 @@ window.goTo = function(n){
   if(n===5) renderFinal();
 };
 window.goBack = function(){
-  if(ST.page>1&&isAdmin()) goTo(ST.page-1);
+  if(ST.page>1&&isManager()) goTo(ST.page-1);
 };
 function canGoFwd(){
   if(ST.page===1) return true;
@@ -944,7 +950,7 @@ function canGoFwd(){
   return false;
 }
 function updateFwdBtn(){
-  const show = isAdmin() && canGoFwd() && ST.page<5 && !ST.rulesOpen;
+  const show = isManager() && canGoFwd() && ST.page<5 && !ST.rulesOpen;
   const btn = document.getElementById('fwdBtn');
   if(btn) btn.style.display = show ? '' : 'none';
   syncDrawerButtons();
@@ -999,13 +1005,13 @@ window.toggleRules = function(){
     return;
   }
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
-  const backPage = ST.rulesOpen ? 'pageR' : 'page'+(isAdmin()?ST.page:4);
+  const backPage = ST.rulesOpen ? 'pageR' : 'page'+(isManager()?ST.page:4);
   document.getElementById(backPage).classList.add('active');
   document.getElementById('ruleBtn').textContent=ST.rulesOpen?'× Fermer':'📋 Règlement';
-  document.getElementById('backBtn').style.display=(ST.rulesOpen||ST.page>1)&&isAdmin()?'':'none';
+  document.getElementById('backBtn').style.display=(ST.rulesOpen||ST.page>1)&&isManager()?'':'none';
   updateFwdBtn();
   if(ST.rulesOpen) applyRoleUI();
-  if(!ST.rulesOpen) updateSpectatorNav(isAdmin()?ST.page:4);
+  if(!ST.rulesOpen) updateSpectatorNav(isManager()?ST.page:4);
 };
 
 // ══════════════════════════════════════════════════════════
@@ -1174,7 +1180,7 @@ function syncCfgForm(){
 }
 
 window.saveCfgAndNext = async function(){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   const cfg=getCfg(); ST.cfg=cfg;
   await saveTournament({ cfg, status:'setup' });
   goTo(2);
@@ -1791,7 +1797,7 @@ function renderTeams(){
         <div style="font-weight:700;color:var(--ink)${isWd(t.id)?';text-decoration:line-through;opacity:.6':''}">${t.name} ${t.club&&t.club!=='—'?`<span class="t-club-badge">${t.club}</span>`:''}${isWd(t.id)?' <span style="font-size:11px;color:var(--red);text-decoration:none;display:inline-block">🚫 ABSENTE</span>':''}</div>
         <div style="font-size:11px;color:var(--muted)">${t.p1} · ${t.p2} · ${'⭐'.repeat(lvNum(t.lv))} ${lvLabel(t.lv)}</div>
       </div>
-      ${isAdmin()?`${ST.schedule.length?`<button onclick="toggleWithdrawn('${t.id}')" title="${isWd(t.id)?'Réintégrer l\'équipe':'Marquer absente (forfait)'}" style="background:none;border:1px solid var(--ylw);color:var(--ylw);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px;margin-right:4px">${isWd(t.id)?'↩️':'🚫'}</button>`:''}<button onclick="openEditTeam('${t.id}')" style="background:none;border:1px solid var(--blu);color:var(--blu);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px;margin-right:4px">✏️</button><button onclick="removeTeam('${t.id}')" style="background:none;border:1px solid var(--red);color:var(--red);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px">✕</button>`:''}
+      ${isManager()?`${ST.schedule.length?`<button onclick="toggleWithdrawn('${t.id}')" title="${isWd(t.id)?'Réintégrer l\'équipe':'Marquer absente (forfait)'}" style="background:none;border:1px solid var(--ylw);color:var(--ylw);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px;margin-right:4px">${isWd(t.id)?'↩️':'🚫'}</button>`:''}<button onclick="openEditTeam('${t.id}')" style="background:none;border:1px solid var(--blu);color:var(--blu);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px;margin-right:4px">✏️</button><button onclick="removeTeam('${t.id}')" style="background:none;border:1px solid var(--red);color:var(--red);border-radius:5px;padding:2px 8px;cursor:pointer;font-size:11px">✕</button>`:''}
     </div>`).join('');
 }
 
@@ -1799,7 +1805,7 @@ function renderTeams(){
 // ÉDITION ÉQUIPE / JOUEURS (modale)
 // ══════════════════════════════════════════════════════════
 window.openEditTeam = function(id){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   const t = ST.teams.find(x=>x.id===id); if(!t) return;
   document.getElementById('edit_team_id').value = t.id;
   document.getElementById('edit_t_name').value = t.name;
@@ -1815,7 +1821,7 @@ window.closeEditTeam = function(){
 };
 
 window.saveEditTeam = async function(){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   const id   = document.getElementById('edit_team_id').value;
   const t = ST.teams.find(x=>x.id===id); if(!t) return;
   const name = document.getElementById('edit_t_name').value.trim();
@@ -1834,7 +1840,7 @@ window.saveEditTeam = async function(){
 };
 
 window.addTeam = async function(){
-  if(!isAdmin()){ alert('Réservé à l\'admin.'); return; }
+  if(!isManager()){ alert('Réservé à l\'admin.'); return; }
   const name  = document.getElementById('t_name').value.trim();
   const club  = document.getElementById('t_club').value.trim() || '—';
   const p1    = document.getElementById('t_p1').value.trim();
@@ -1864,7 +1870,7 @@ function refreshAfterWithdrawal(){
   if(document.getElementById('absOverlay') && document.getElementById('absOverlay').style.display!=='none') renderAbsModal();
 }
 window.toggleWithdrawn = async function(id){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   const t = tObj(id); if(!t) return;
   const was = isWd(id);
   const txt = was
@@ -1878,7 +1884,7 @@ window.toggleWithdrawn = async function(id){
   refreshAfterWithdrawal();
 };
 window.openAbsModal = function(){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   let ov = document.getElementById('absOverlay');
   if(!ov){
     ov = document.createElement('div');
@@ -1912,7 +1918,7 @@ function renderAbsModal(){
 }
 
 window.removeTeam = async function(id){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   if(!confirm('Supprimer cette équipe ?')) return;
   ST.teams = ST.teams.filter(t=>t.id!==id);
   ST.withdrawn = (ST.withdrawn||[]).filter(x=>x!==id);
@@ -1922,7 +1928,7 @@ window.removeTeam = async function(id){
 };
 
 window.clearTeams = async function(){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   if(!confirm('Vider toutes les équipes ?')) return;
   ST.teams = []; ST.withdrawn = [];
   await saveTournament({ teams: [], withdrawn: [] });
@@ -1931,7 +1937,7 @@ window.clearTeams = async function(){
 };
 
 window.autoFillTeams = async function(){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   const cfg = getCfg();
   const n = cfg.n || 32;
   const clubs = ['RSTH','Mauves','Ancenis','Nantes','Laval','Angers','Le Mans','Cholet'];
@@ -1964,7 +1970,7 @@ async function clearAllResults(){
   } catch(e){ alert('Erreur lors de l\'effacement des scores : '+e.message); return false; }
 }
 window.regenerate = async function(){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   const hasScores = Object.values(ST.results||{}).some(r=>r&&(r.ga!==''||r.gb!==''));
   if(hasScores || ST.tStatus==='active'){
     if(!confirm('⚠️ Le tournoi est déjà lancé'+(hasScores?' et des scores sont saisis':'')+'.\nRégénérer le planning EFFACERA tous les scores. Continuer ?')) return;
@@ -1977,7 +1983,7 @@ window.regenerate = async function(){
   if(buildSchedule()){ await saveTournament({ schedule: ST.schedule, activeRound:0, withdrawn: [] }); renderGen(); }
 };
 window.startTournament = async function(){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   const hasScores = Object.values(ST.results||{}).some(r=>r&&(r.ga!==''||r.gb!==''));
   if(hasScores || ST.tStatus==='active'){
     if(!confirm('Le tournoi est déjà lancé. Relancer EFFACERA tous les scores. Continuer ?')) return;
@@ -1989,7 +1995,7 @@ window.startTournament = async function(){
   goTo(4);
 };
 window.newTournament = async function(){
-  if(!isAdmin()){ alert('Admin uniquement.'); return; }
+  if(!isManager()){ alert('Admin uniquement.'); return; }
   if(!confirm('Nouveau tournoi ? Toutes les données seront perdues.')) return;
   clearInterval(ST.timerIv);
   ST.teams=[]; ST.schedule=[]; ST.results={}; ST.activeRound=0; ST.withdrawn=[];
@@ -2003,7 +2009,7 @@ window.newTournament = async function(){
   renderTeams(); goTo(1); onCfgChange();
 };
 window.resetAllScores = async function(){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   if(!confirm('Réinitialiser TOUS les scores ?\nLe planning reste intact.')) return;
   try {
     const { getDocs, collection: col2, deleteDoc: delDoc2, doc: doc2 } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
@@ -2073,7 +2079,7 @@ window.scoreNav = function(e,el){
 };
 window.setRound = async function(r){
   ST.activeRound=r;
-  if(isAdmin()) await saveTournament({ activeRound: r });
+  if(isManager()) await saveTournament({ activeRound: r });
   renderRoundTabs(); renderMatches();
 };
 
@@ -2160,7 +2166,7 @@ function renderMatches(){
   const halls=round.halls;
   let matchOffset=0;
   const nWd=(ST.withdrawn||[]).length;
-  const absBar=isAdmin()?`<div style="margin-bottom:10px"><button class="btn btn-ghost btn-sm" onclick="openAbsModal()" style="${nWd?'border-color:var(--red);color:var(--red)':''}">🚫 Équipes absentes${nWd?' ('+nWd+')':''}</button></div>`:'';
+  const absBar=isManager()?`<div style="margin-bottom:10px"><button class="btn btn-ghost btn-sm" onclick="openAbsModal()" style="${nWd?'border-color:var(--red);color:var(--red)':''}">🚫 Équipes absentes${nWd?' ('+nWd+')':''}</button></div>`:'';
   el.innerHTML=absBar+timeHeader+halls.map((h,hi)=>{
     const hallHtml=h.matches.map((m,localMi)=>{
       const globalMi = matchOffset + localMi;
@@ -2194,7 +2200,7 @@ function renderMatches(){
         <div class="mt-r">
           <div class="mt-court">${h.label?h.label+' · ':''}TERRAIN ${localMi+1}</div>
           ${mkTeamCard(m.tB)}
-          ${isScorer()?`<button onclick="printTeamScheduleSingle('${m.tA}')" title="Fiche équipe A" style="background:none;border:1px solid var(--bdr);color:var(--muted);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;margin-top:4px;margin-right:4px">🖨 A</button><button onclick="printTeamScheduleSingle('${m.tB}')" title="Fiche équipe B" style="background:none;border:1px solid var(--bdr);color:var(--muted);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;margin-top:4px;margin-right:4px">🖨 B</button>`:''}${isAdmin()?`<button onclick="openEditTeam('${m.tA}')" title="Modifier équipe A" style="background:none;border:1px solid var(--blu);color:var(--blu);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;margin-top:4px;margin-right:4px">✏️ A</button><button onclick="openEditTeam('${m.tB}')" title="Modifier équipe B" style="background:none;border:1px solid var(--blu);color:var(--blu);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;margin-top:4px">✏️ B</button>`:''}
+          ${isScorer()?`<button onclick="printTeamScheduleSingle('${m.tA}')" title="Fiche équipe A" style="background:none;border:1px solid var(--bdr);color:var(--muted);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;margin-top:4px;margin-right:4px">🖨 A</button><button onclick="printTeamScheduleSingle('${m.tB}')" title="Fiche équipe B" style="background:none;border:1px solid var(--bdr);color:var(--muted);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;margin-top:4px;margin-right:4px">🖨 B</button>`:''}${isManager()?`<button onclick="openEditTeam('${m.tA}')" title="Modifier équipe A" style="background:none;border:1px solid var(--blu);color:var(--blu);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;margin-top:4px;margin-right:4px">✏️ A</button><button onclick="openEditTeam('${m.tB}')" title="Modifier équipe B" style="background:none;border:1px solid var(--blu);color:var(--blu);border-radius:6px;padding:3px 8px;cursor:pointer;font-size:11px;margin-top:4px">✏️ B</button>`:''}
         </div>
       </div>`;
     }).join('');
@@ -2866,7 +2872,7 @@ function renderTVContent(){
 // LIVE OPEN CONTROL
 // ══════════════════════════════════════════════════════════
 window.toggleLiveOpen = async function(){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   const newVal = !ST.liveOpen;
   handleLiveOpenChange(newVal);
   await saveTournament({ liveOpen: newVal });
@@ -2908,7 +2914,7 @@ window.toggleAdminPanel = function(){
   const el=document.getElementById('adminPanel');
   const opening = el.style.display==='none';
   el.style.display = opening ? 'block' : 'none';
-  if(opening && isAdmin()){
+  if(opening && isManager()){
     // Tout se charge automatiquement dès l'ouverture du panneau —
     // plus besoin de cliquer sur "Charger" / "Rafraîchir".
     window.loadUserList();
@@ -2995,7 +3001,7 @@ window.loadUserList = function(){
     listEl.innerHTML='';
     snap.forEach(d=>{
       const u=d.data(); const uid=d.id;
-      const roleIconMap={admin:'👑',scorer:'✏️',spectator:'👁',club:'🏟️'};
+      const roleIconMap={admin:'👑',users:'🛠',scorer:'✏️',spectator:'👁',club:'🏟️'};
       const roles = Array.isArray(u.roles) && u.roles.length ? u.roles : [u.role||'spectator'];
       if(roles.length===1 && roles[0]==='club') return; // compte club : voir dossier « Clubs »
       const rolesDisplay = roles.map(r=>`${roleIconMap[r]||'?'} ${r}`).join(' · ');
@@ -3030,6 +3036,7 @@ window.copyUID = function(uid, btn){
 // ── Pré-remplit le formulaire "Modifier rôle" depuis la liste,
 //    sans avoir à copier/coller l'UID à la main ──────────────
 window.adminEditUserRole = async function(uid){
+  if(!isAdmin()) return;
   const staffBox = document.getElementById('admStaffBox'); if(staffBox) staffBox.open = true;
   const input = document.getElementById('adminUidInput');
   if(input) input.value = uid;
@@ -3054,7 +3061,7 @@ window.deleteUserFromList = async function(uid){
 // ADMIN — GESTION DES CLUBS
 // ══════════════════════════════════════════════════════════
 window.adminCreateClub = async function(){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   const clubName = document.getElementById('newC_name').value.trim();
   const email    = document.getElementById('newC_email').value.trim();
   const pwd      = document.getElementById('newC_pwd').value;
@@ -3075,7 +3082,7 @@ window.adminCreateClub = async function(){
   } catch(e){ msg.textContent='❌ '+e.message; msg.style.color='var(--red)'; }
 };
 window.loadClubList = function(){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   const listEl=document.getElementById('clubListBody'); if(!listEl) return;
   if(unsubClubList) return; // déjà abonné, rien à refaire
   listEl.innerHTML='<tr><td colspan="5" style="color:var(--muted);padding:10px 0">Chargement…</td></tr>';
@@ -3100,7 +3107,7 @@ window.loadClubList = function(){
       listEl.appendChild(tr);
     });
   };
-  unsubClubList = onSnapshot(collection(db,'users'), (snap)=>{
+  unsubClubList = onSnapshot(query(collection(db,'users'), where('roles','array-contains','club')), (snap)=>{
     latestClubs = [];
     snap.forEach(d=>{ const u=d.data(); const rs = Array.isArray(u.roles)&&u.roles.length ? u.roles : [u.role]; if(rs.includes('club')) latestClubs.push({uid:d.id,...u}); });
     render();
@@ -3132,7 +3139,7 @@ function syncRegForm(){
   toggleRegReserveUI();
 }
 window.saveRegSettings = async function(){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   const msg = document.getElementById('regSettingsMsg');
   const say = (t,c)=>{ if(msg){ msg.textContent=t; msg.style.color=c; } };
   const openAt  = document.getElementById('reg_open').value  || '';
@@ -3154,7 +3161,7 @@ window.saveRegSettings = async function(){
   else say('❌ Échec de l\'enregistrement.','var(--red)');
 };
 window.clearRegDates = async function(){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   document.getElementById('reg_open').value = '';
   document.getElementById('reg_close').value = '';
   document.getElementById('reg_finalClose').value = '';
@@ -3174,6 +3181,7 @@ window.deleteClub = async function(uid){
     const roles = Array.isArray(d.roles) && d.roles.length ? d.roles : [d.role];
     const others = roles.filter(r=>r && r!=='club');
     if(others.length){
+      if(!isAdmin()){ alert('Ce compte a aussi un rôle staff : seul un admin peut lui retirer le rôle club.'); return; }
       if(!confirm('Ce compte a aussi le(s) rôle(s) : '+others.join(', ')+'.\nSeul le rôle « responsable club » sera retiré (le compte est conservé). Continuer ?')) return;
       await updateDoc(doc(db,'users',uid),{ roles: others, role: primaryRole(others), clubName: deleteField(), maxTeams: deleteField() });
     } else {
@@ -3185,7 +3193,7 @@ window.deleteClub = async function(uid){
 };
 let REG_PENDING_IC = [];
 window.loadPendingRegistrations = function(force){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   const listEl=document.getElementById('pendingRegList'); if(!listEl) return;
   // Bouton 🔄 : (re)création forcée de l'écoute ; sinon simple affichage si déjà abonné
   if(force===true && unsubPendingRegs){ unsubPendingRegs(); unsubPendingRegs=null; }
@@ -3201,7 +3209,7 @@ window.loadPendingRegistrations = function(force){
     // L'écoute est terminée : on libère le verrou pour pouvoir se réabonner (et on réessaie seul)
     unsubPendingRegs = null;
     listEl.innerHTML=`<div style="color:var(--red);padding:10px 0">Erreur : ${e.message} — nouvelle tentative…</div>`;
-    setTimeout(()=>{ if(isAdmin() && !unsubPendingRegs) loadPendingRegistrations(); }, 5000);
+    setTimeout(()=>{ if(isManager() && !unsubPendingRegs) loadPendingRegistrations(); }, 5000);
   });
 };
 function renderPendingRegistrationsIC(){
@@ -3234,7 +3242,7 @@ function renderPendingRegistrationsIC(){
   }).join('');
 }
 window.approveAllPending = async function(){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   const max = (ST.cfg && ST.cfg.n) ? ST.cfg.n : 0;
   let free = Math.max(0, max - ST.teams.length);
   if(free<=0){ alert('Aucune place disponible : le quota du tournoi est déjà atteint.'); return; }
@@ -3256,7 +3264,7 @@ window.approveAllPending = async function(){
   alert(`${ok} équipe${ok>1?'s':''} validée${ok>1?'s':''}.` + (fail?` ${fail} échec${fail>1?'s':''} (voir console).`:'') + (queue.length>toApprove.length ? `\n${queue.length-toApprove.length} équipe(s) restent en liste d'attente, quota atteint.` : ''));
 };
 window.approveRegistration = async function(id){
-  if(!isAdmin()) return;
+  if(!isManager()) return;
   const max = (ST.cfg && ST.cfg.n) ? ST.cfg.n : 0;
   if(ST.teams.length >= max){
     alert(`Impossible : le tournoi est configuré pour ${max} équipes et cette quantité est déjà atteinte.\nAugmentez le nombre d'équipes dans Config si besoin, ou refusez/supprimez une équipe existante.`);
@@ -3275,7 +3283,7 @@ window.approveRegistration = async function(id){
   } catch(e){ alert('Erreur : '+e.message); }
 };
 window.rejectRegistration = async function(id){
-  if(!isAdmin()||!confirm('Refuser et supprimer cette inscription ?')) return;
+  if(!isManager()||!confirm('Refuser et supprimer cette inscription ?')) return;
   try {
     const reg = REG_PENDING_IC.find(r=>r.id===id);
     await deleteDoc(doc(db,'interclub_registrations',id));
@@ -3387,7 +3395,7 @@ function renderTimerPanel(){
           ${v.status!=='idle'?`<button class="btn btn-ghost btn-xs" onclick="timerReset('${g}')">⏹ Remise à zéro</button>`:''}
         </div>`;
       }).join('');
-      if(multi && isAdmin()) html += `<label class="timer-link-lbl"><input type="checkbox" ${linked?'checked':''} onchange="timerSetLinked(this.checked)"> 🔗 Chronos liés (une seule commande pour toutes les salles)</label>`;
+      if(multi && isManager()) html += `<label class="timer-link-lbl"><input type="checkbox" ${linked?'checked':''} onchange="timerSetLinked(this.checked)"> 🔗 Chronos liés (une seule commande pour toutes les salles)</label>`;
       ctl.innerHTML=html;
     }
   }
@@ -3475,7 +3483,7 @@ window.timerReset = function(grp){
   timerWrite(timerTargets(grp), ()=>timerIdle());
 };
 window.timerSetLinked = async function(on){
-  if(!isAdmin()) return; // chronos liés / séparés : choix réservé à l'admin
+  if(!isManager()) return; // chronos liés / séparés : choix réservé à l'admin
   if(!ST.timers) ST.timers = timersDefault();
   ST.timers.linked = !!on;
   const patch={ linked: !!on };
@@ -3522,7 +3530,7 @@ function reconcileChrono(){
 }
 setInterval(reconcileChrono, 1000);
 window.toggleChronoMobile = async function () {
-  if (!isAdmin()) return;
+  if (!isManager()) return;
   const t = document.getElementById('chronoMobileToggle');
   const on = !!(t && t.checked);
   try { await setDoc(doc(db,'interclub','status'), { chronoMobile: on }, { merge: true }); }
@@ -4704,6 +4712,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
             <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:4px">
               <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="newU_roleChk" value="scorer" onchange="toggleNewUClubFields()"> ✏️ Scorer</label>
               <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="newU_roleChk" value="spectator" onchange="toggleNewUClubFields()"> 👁 Spectateur</label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="newU_roleChk" value="users" onchange="toggleNewUClubFields()"> 🛠 Users</label>
               <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="newU_roleChk" value="admin" onchange="toggleNewUClubFields()"> 👑 Admin</label>
             </div>
           </div>
@@ -4725,6 +4734,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
             <label>Rôle(s) — plusieurs possibles</label>
             <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:4px">
               <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="chgU_roleChk" value="admin"> 👑 Admin</label>
+              <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="chgU_roleChk" value="users"> 🛠 Users</label>
               <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="chgU_roleChk" value="scorer"> ✏️ Scorer</label>
               <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" class="chgU_roleChk" value="spectator"> 👁 Spectateur</label>
             </div>
@@ -4733,7 +4743,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
             <button class="btn btn-y btn-sm" onclick="setUserRole()">Appliquer</button>
           </div>
           <div id="adminRoleMsg" style="font-size:13px;min-height:18px"></div>
-          <div style="font-size:11px;color:var(--muted);line-height:1.6">💡 Le rôle « club » d'un compte n'est jamais modifié ici : il se gère dans le dossier « Clubs ».</div>
+          <div style="font-size:11px;color:var(--muted);line-height:1.6">💡 <strong>Admin</strong> = tout, y compris ce dossier. <strong>Users</strong> = tous les réglages de l'appli sauf les comptes staff. Le rôle « club » se gère dans le dossier « Clubs ».</div>
         </div>
       </div>
       <div style="grid-column:1/-1;margin-top:16px;border-top:1px solid var(--bdr);padding-top:16px">
