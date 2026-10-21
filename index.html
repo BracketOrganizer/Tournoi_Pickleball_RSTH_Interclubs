@@ -1998,16 +1998,31 @@ window.startTournament = async function(){
   await saveTournament({ schedule: ST.schedule, activeRound:0, status:'active', results:{} });
   goTo(4);
 };
-// Nouvelle édition : efface les inscriptions (en attente + validées) et les verrous anti-doublon
+// Nouvelle édition : efface les inscriptions (en attente + validées) et les verrous anti-doublon des équipes.
+// Chaque suppression est indépendante et comptée : rien n'échoue en silence.
 async function purgeRegistrations(){
-  try {
-    const [regs, locks] = await Promise.all([
-      getDocs(collection(db,'interclub_registrations')),
-      getDocs(collection(db,'interclub_team_locks'))
-    ]);
-    await Promise.all([...regs.docs, ...locks.docs].map(d=>deleteDoc(d.ref)));
-  } catch(e){ console.warn('purgeRegistrations', e); alert('Les inscriptions de l\'édition précédente n\'ont pas pu toutes être effacées : ' + e.message); }
+  const out = { regs:0, locks:0, errors:[] };
+  for(const [col,key] of [['interclub_registrations','regs'],['interclub_team_locks','locks']]){
+    try {
+      const snap = await getDocs(collection(db,col));
+      const res = await Promise.allSettled(snap.docs.map(d=>deleteDoc(d.ref)));
+      res.forEach(r=>{ if(r.status==='fulfilled') out[key]++; else out.errors.push(col+' : '+((r.reason&&r.reason.message)||r.reason)); });
+    } catch(e){ out.errors.push(col+' : '+e.message); }
+  }
+  return out;
 }
+function purgeSummary(p){
+  if(p.errors.length) return '⚠️ Nettoyage incomplet : '+p.regs+' inscription(s) et '+p.locks+' verrou(x) effacé(s). Erreur : '+p.errors[0];
+  return '🧹 '+p.regs+' inscription(s) et '+p.locks+' verrou(x) de l\'édition précédente effacé(s).';
+}
+window.purgeAllRegistrations = async function(){
+  if(!isManager()) return;
+  const msg = document.getElementById('purgeMsg');
+  if(!confirm('Effacer TOUTES les inscriptions en ligne (en attente et validées) et les verrous anti-doublon ?\n\nLes équipes déjà intégrés au tournoi ne sont pas retirés. Les comptes des responsables sont conservés.')) return;
+  if(msg){ msg.textContent='Nettoyage en cours…'; msg.style.color='var(--muted)'; }
+  const p = await purgeRegistrations();
+  if(msg){ msg.textContent = purgeSummary(p); msg.style.color = p.errors.length ? 'var(--red)' : 'var(--grn)'; }
+};
 window.newTournament = async function(){
   if(!isManager()){ alert('Admin uniquement.'); return; }
   if(!confirm('Nouveau tournoi ?\n\nSeront effacés : équipes, planning, scores ET inscriptions des clubs (en attente et validées).\nLes comptes des responsables de club sont conservés.')) return;
@@ -2016,8 +2031,9 @@ window.newTournament = async function(){
   ST.timerSec=0; ST.timerRun=false; ST.rulesOpen=false;
   document.getElementById('ruleBtn').textContent='📋 Règlement';
   ST.timers = timersDefault();
+  const purged = await purgeRegistrations(); // repartir de zéro : inscriptions + verrous de l'édition précédente
+  if(purged.regs || purged.locks || purged.errors.length) alert(purgeSummary(purged));
   await clearAllResults();
-  await purgeRegistrations(); // repartir de zéro : inscriptions + verrous anti-doublon de l'édition précédente
   ST.tStatus='setup';
   await saveTournament({ cfg:ST.cfg, teams:[], schedule:[], activeRound:0, status:'setup', withdrawn:[] });
   await saveTimers(ST.timers);
@@ -4894,6 +4910,15 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
             </div>
             <div style="display:flex;justify-content:flex-end;margin-top:10px"><button class="btn btn-g btn-sm" onclick="adminLinkClubRole()">✓ Ajouter le rôle club</button></div>
             <div id="linkClubMsg" style="font-size:13px;min-height:18px"></div>
+          </div>
+        </details>
+        <details class="adm-sub">
+          <summary>🧹 Nouvelle édition : effacer les inscriptions de l'ancien tournoi</summary>
+          <div class="adm-body">
+            <div style="font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5">« Nouveau tournoi » le fait déjà automatiquement. Ce bouton permet de le refaire à tout moment : il efface toutes les inscriptions (en attente et validées) et les verrous anti-doublon, pour que les responsables puissent réinscrire les mêmes équipes. Les comptes responsables sont conservés.</div>
+            <button class="btn btn-r btn-sm" onclick="purgeAllRegistrations()">🧹 Effacer toutes les inscriptions</button>
+            <div id="purgeMsg" style="font-size:13px;min-height:18px;margin-top:8px"></div>
+            <div style="font-size:11px;color:var(--muted);margin-top:6px">Version de l'appli : 21/10 · nettoyage des inscriptions v2</div>
           </div>
         </details>
         <details class="adm-sub">
