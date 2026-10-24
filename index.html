@@ -3328,7 +3328,19 @@ window.chooseAccess = function(k){
   const ov = document.getElementById('accessChoiceOverlay'); if(ov) ov.remove();
   if(k==='club') openClubFromApp();
 };
+function updatePendingCounters(){
+  const n=REG_PENDING_IC.length;
+  ['pendingRegCount','clubsPendingCount'].forEach(id=>{
+    const el=document.getElementById(id); if(!el) return;
+    el.textContent=String(n); el.classList.toggle('on',n>0);
+  });
+  ['adminBtnCount','drawerAdminBtnCount'].forEach(id=>{
+    const el=document.getElementById(id); if(!el) return;
+    el.textContent=n?String(n):''; el.style.display=n?'inline-block':'none';
+  });
+}
 function renderPendingRegistrationsIC(){
+  updatePendingCounters();
   const listEl=document.getElementById('pendingRegList'); if(!listEl) return;
   const max = (ST.cfg && ST.cfg.n) ? ST.cfg.n : 0;
   const current = ST.teams.length;
@@ -4372,6 +4384,9 @@ html,body{ height:100%; background:var(--s0); color:var(--ink); font-family:'Exo
 /* ── ADMIN PANEL ─────────────────────────────────────── */
 .admin-panel{ background:var(--s1);color:var(--ink);padding:16px 20px;border-bottom:2px solid var(--bdr2);box-shadow:var(--shadow); }
 .admin-panel-ttl{ font-family:'Oswald',sans-serif;font-size:16px;letter-spacing:1px;color:var(--ylw);margin-bottom:12px; }
+.pend-count{ display:inline-block;min-width:22px;text-align:center;font-family:'Oswald',sans-serif;font-size:13px;font-weight:700;padding:1px 8px;border-radius:12px;background:rgba(255,255,255,.14);color:var(--muted);vertical-align:middle; }
+.pend-count.on{ background:#e6a23c;color:#1a1a1a; }
+.hdr-badge{ display:none;margin-left:6px;min-width:18px;text-align:center;font-size:11px;font-weight:700;padding:0 6px;border-radius:10px;background:var(--red);color:#fff; }
 .adm-box{ border:1px solid var(--bdr2);border-radius:12px;margin-bottom:14px;background:var(--s2); }
 .adm-box>summary{ cursor:pointer;padding:12px 14px;font-family:'Oswald',sans-serif;font-size:15px;letter-spacing:.8px;color:var(--ylw);list-style:none;user-select:none; }
 .adm-box>summary::-webkit-details-marker{ display:none; }
@@ -4787,7 +4802,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
     <button class="hdr-btn" id="ruleBtn" onclick="toggleRules()">📋 Règlement</button>
     <button class="hdr-btn" id="liveBtn" data-role="scorer" onclick="goToLive()" style="display:none">📺 Live</button>
     <button class="hdr-btn" id="tvBtn" data-role="scorer" onclick="goTo('TV')" style="display:none">📺 Écran</button>
-    <button class="hdr-btn" id="adminBtn" data-role="admin" onclick="toggleAdminPanel()" style="display:none">👑 Admin</button>
+    <button class="hdr-btn" id="adminBtn" data-role="admin" onclick="toggleAdminPanel()" style="display:none">👑 Admin<span class="hdr-badge" id="adminBtnCount"></span></button>
     <button class="hdr-btn" id="clubExtraBtn" onclick="openClubFromApp()" style="display:none">🏟️ Mon club</button>
     <button class="hdr-btn" id="backBtn" style="display:none" onclick="goBack()">← Retour</button>
     <button class="hdr-btn" id="fwdBtn" style="display:none" onclick="goFwd()">Suivant →</button>
@@ -4803,7 +4818,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
   <button class="hdr-drawer-btn" onclick="closeMobileMenu();toggleRules()">📋&nbsp; Règlement</button>
   <button class="hdr-drawer-btn" id="drawerLiveBtn" data-role="scorer" onclick="closeMobileMenu();goToLive()" style="display:none">📺&nbsp; Live</button>
   <button class="hdr-drawer-btn" id="drawerTvBtn" data-role="scorer" onclick="closeMobileMenu();goTo('TV')" style="display:none">📺&nbsp; Écran</button>
-  <button class="hdr-drawer-btn" id="drawerAdminBtn" data-role="admin" onclick="closeMobileMenu();toggleAdminPanel()" style="display:none">👑&nbsp; Admin</button>
+  <button class="hdr-drawer-btn" id="drawerAdminBtn" data-role="admin" onclick="closeMobileMenu();toggleAdminPanel()" style="display:none">👑&nbsp; Admin<span class="hdr-badge" id="drawerAdminBtnCount"></span></button>
   <button class="hdr-drawer-btn" id="drawerClubExtraBtn" onclick="closeMobileMenu();openClubFromApp()" style="display:none">🏟️&nbsp; Mon club</button>
   <button class="hdr-drawer-btn" id="drawerBackBtn" style="display:none" onclick="closeMobileMenu();goBack()">← &nbsp;Retour</button>
   <button class="hdr-drawer-btn" id="drawerFwdBtn" style="display:none" onclick="closeMobileMenu();goFwd()">→ &nbsp;Suivant</button>
@@ -4878,7 +4893,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
 
       <!-- 🏟️ GESTION DES CLUBS -->
     <details class="adm-box" id="admClubsBox">
-      <summary>🏟️ CLUBS — comptes clubs, inscriptions en ligne, validation</summary>
+      <summary>🏟️ CLUBS — comptes clubs, inscriptions en ligne, validation <span id="clubsPendingCount" class="pend-count" title="Équipes en attente de validation">0</span></summary>
       <div class="adm-body">
         <details class="adm-sub">
           <summary>➕ Créer un compte club (accès inscription d'équipes)</summary>
@@ -4952,7 +4967,7 @@ body.tv-mode .hdr-drawer-overlay{ display:none!important; }
         <div style="overflow-x:auto"><table class="user-tbl" style="width:100%;border-collapse:collapse"><thead><tr style="border-bottom:2px solid var(--bdr2)"><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Club</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Email</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Équipes</th><th style="text-align:left;padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Quota</th><th style="padding:6px;font-size:11px;color:var(--muted);font-weight:700;text-transform:uppercase">Action</th></tr></thead><tbody id="clubListBody"><tr><td colspan="5" style="color:var(--muted);font-size:13px;padding:10px 0">Chargement…</td></tr></tbody></table></div>
 
         <div style="display:flex;align-items:center;gap:12px;margin:20px 0 12px;flex-wrap:wrap">
-          <div class="admin-panel-ttl" style="margin-bottom:0">⏳ Inscriptions en attente de validation</div>
+          <div class="admin-panel-ttl" style="margin-bottom:0">⏳ Inscriptions en attente de validation <span id="pendingRegCount" class="pend-count" title="Équipes en attente de validation">0</span></div>
           <button onclick="loadPendingRegistrations(true)" style="background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.2);color:#fff;padding:4px 14px;border-radius:6px;cursor:pointer;font-size:12px">🔄 Rafraîchir</button>
           <button id="regValidateAllBtn" class="btn btn-g btn-sm" style="display:none" onclick="approveAllPending()">✓✓ Tout valider (dans la limite des places)</button>
         </div>
